@@ -1,7 +1,8 @@
-use std::io::{self, Cursor, Error, ErrorKind};
+use std::io::{self, Error, ErrorKind};
 
-use bytes::{BigEndian, Buf, BufMut, IntoBuf, BytesMut};
+use bytes::{BigEndian, Buf, BufMut, IntoBuf};
 
+#[derive(Debug)]
 pub enum TftpPacket<'req> {
     ReadRequest {
         filename: &'req [u8],
@@ -37,9 +38,15 @@ impl<'req> TftpPacket<'req> {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"))
                 }
                 if code == 1 {
-                    Ok(TftpPacket::ReadRequest { filename: strs[0], mode: strs[1] })
+                    Ok(TftpPacket::ReadRequest {
+                        filename: strs[0],
+                        mode: strs[1],
+                    })
                 } else {
-                    Ok(TftpPacket::WriteRequest { filename: strs[0], mode: strs[1] })
+                    Ok(TftpPacket::WriteRequest {
+                        filename: strs[0],
+                        mode: strs[1]
+                    })
                 }
             },
             3 => {
@@ -74,26 +81,26 @@ impl<'req> TftpPacket<'req> {
         }
     }
 
-    pub fn encode(&self, out: &mut BytesMut) {
+    pub fn encode<B: BufMut>(&self, out: &mut B) {
         match *self {
             TftpPacket::ReadRequest { filename, mode } => {
                 out.put_u16::<BigEndian>(1);
-                out.extend_from_slice(filename);
+                out.put(filename);
                 out.put_u8(0);
-                out.extend_from_slice(mode);
+                out.put(mode);
                 out.put_u8(0);
             },
             TftpPacket::WriteRequest { filename, mode } => {
                 out.put_u16::<BigEndian>(2);
-                out.extend_from_slice(filename);
+                out.put(filename);
                 out.put_u8(0);
-                out.extend_from_slice(mode);
+                out.put(mode);
                 out.put_u8(0);
             },
             TftpPacket::Data { block, data } => {
                 out.put_u16::<BigEndian>(3);
                 out.put_u16::<BigEndian>(block);
-                out.extend_from_slice(data);
+                out.put(data);
 
             }
             TftpPacket::Ack(block) => {
@@ -103,7 +110,7 @@ impl<'req> TftpPacket<'req> {
             TftpPacket::Error { code, message } => {
                 out.put_u16::<BigEndian>(5);
                 out.put_u16::<BigEndian>(code);
-                out.extend_from_slice(message);
+                out.put(message);
                 out.put_u8(0);
             },
         }
