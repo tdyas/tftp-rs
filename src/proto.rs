@@ -1,3 +1,5 @@
+use ascii::AsciiStr;
+use std::fmt;
 use std::io::{self, Error, ErrorKind};
 
 use bytes::{BigEndian, Buf, BufMut, IntoBuf};
@@ -112,6 +114,34 @@ impl<'req> TftpPacket<'req> {
                 out.put_u16::<BigEndian>(code);
                 out.put(message);
                 out.put_u8(0);
+            },
+        }
+    }
+}
+
+impl<'a> fmt::Display for TftpPacket<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::TftpPacket::*;
+        match *self {
+            ReadRequest { ref filename, ref mode } => {
+                let filename = AsciiStr::from_ascii(filename).unwrap();
+                let mode = AsciiStr::from_ascii(mode).unwrap();
+                write!(f, "RRQ[file={}, mode={}]", filename, mode)
+            },
+            WriteRequest { ref filename, ref mode } => {
+                let filename = AsciiStr::from_ascii(filename).unwrap();
+                let mode = AsciiStr::from_ascii(mode).unwrap();
+                write!(f, "WRQ[file={}, mode={}]", filename, mode)
+            },
+            Data { block, data } => {
+                write!(f, "DATA[block={}, {} bytes]", block, data.len())
+            },
+            Ack(block) => {
+                write!(f, "ACK[block={}]", block)
+            }
+            Error { code, ref message } => {
+                let message = AsciiStr::from_ascii(message).unwrap();
+                write!(f, "ERROR[code={}, msg='{}']", code, message)
             },
         }
     }

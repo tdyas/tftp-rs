@@ -1,3 +1,4 @@
+extern crate ascii;
 extern crate bytes;
 #[macro_use]
 extern crate futures;

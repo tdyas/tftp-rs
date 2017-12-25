@@ -124,7 +124,7 @@ impl TftpServer {
 
         let _request = match TftpPacket::from_bytes(&raw_request.data[..]) {
             Ok(req) => {
-                println!(">> {}: {:?}", &raw_request.addr, &req);
+                println!(">> {}: {}", &raw_request.addr, &req);
                 req
             },
             Err(err) => {
@@ -132,7 +132,7 @@ impl TftpServer {
                 return;
             },
         };
-        
+
         let reply = TftpPacket::Error {
             code: 1,
             message: &b"File not found."[..],
