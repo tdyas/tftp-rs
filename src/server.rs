@@ -4,7 +4,6 @@ use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
 
 use bytes::{Bytes, BytesMut};
 use futures::prelude::*;
-use futures::stream;
 use futures::{Async, AsyncSink, Poll, Sink, StartSend, Stream};
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::Handle;
@@ -104,27 +103,24 @@ pub struct TftpServer {
 impl TftpServer {
     pub fn bind(addr: &SocketAddr, handle: Handle) -> io::Result<TftpServer> {
         let socket= UdpSocket::bind(addr, &handle)?;
-        let (sink, stream) = RawUdpStream::new(socket).split();
+        let stream= RawUdpStream::new(socket);
 
-        let handle_clone = handle.clone();
-
-        let stream = stream
-            .map(move |raw_request| {
-                TftpServer::handle_request(raw_request, handle_clone.clone())
-            })
-            .flatten();
-
-        let driver_future = sink
-            .send_all(stream)
-            .map(|(_, _)| ());
+        let incoming = stream
+            .for_each(move |raw_request| {
+                TftpServer::handle_request(raw_request, handle.clone());
+                Ok(())
+            });
 
         Ok(TftpServer {
-            incoming: Box::new(driver_future),
+            incoming: Box::new(incoming),
         })
     }
 
-    fn handle_request(raw_request: Packet, _handle: Handle) -> Box<Stream<Item=Packet, Error=io::Error>> {
-        println!("handle_request: raw_request");
+    fn handle_request(raw_request: Packet, handle: Handle) {
+        // Bind a socket for this connection.
+        let reply_bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        let reply_socket = UdpSocket::bind(&reply_bind_addr, &handle).unwrap();
+        let reply_stream = RawUdpStream::new(reply_socket);
 
         let _request = match TftpPacket::from_bytes(&raw_request.data[..]) {
             Ok(req) => {
@@ -133,10 +129,10 @@ impl TftpServer {
             },
             Err(err) => {
                 println!("-- {}: {}", &raw_request.addr, &err);
-                return Box::new(stream::empty());
+                return;
             },
         };
-
+        
         let reply = TftpPacket::Error {
             code: 1,
             message: &b"File not found."[..],
@@ -146,9 +142,13 @@ impl TftpServer {
         reply.encode(&mut buffer);
         let reply_packet = Packet { addr: raw_request.addr, data: buffer.freeze() };
 
-        println!(">> {}: {} bytes", &reply_packet.addr, reply_packet.data.len());
+        let send_future = reply_stream
+            .send(reply_packet)
+            .and_then(|mut sink| sink.close())
+            .map(|_| ())
+            .map_err(|_| ());
 
-        Box::new(stream::once(Ok(reply_packet)))
+        handle.spawn(send_future);
     }
 }
 
