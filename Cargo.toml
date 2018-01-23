@@ -6,7 +6,7 @@ authors = ["Tom Dyas <tom@shoalsoftware.com>"]
 [dependencies]
 ascii = "0.8"
 bytes = "0.4"
-futures = "0.1"
+futures-await = "0.1"
 tokio-io = "0.1"
 tokio-core = "0.1"
 tokio-proto = "0.1"
