@@ -119,7 +119,7 @@ struct TftpConnState {
 
 impl TftpConnState {
     #[async(boxed)]
-    fn send_and_receive_next(self: Rc<Self>, bytes_to_send: Bytes) -> io::Result<Rc<Datagram>> {
+    fn send_and_receive_next(self: Box<Self>, bytes_to_send: Bytes) -> io::Result<Rc<Datagram>> {
 
         if self.trace_packets {
             let packet = TftpPacket::from_bytes(&bytes_to_send).unwrap();
@@ -188,7 +188,7 @@ pub struct TftpServer {
 impl TftpServer {
     #[async(boxed)]
     fn do_read_request(stream: RawUdpStream, remote_addr: SocketAddr) -> io::Result<()> {
-        let conn_state = Rc::new(TftpConnState {
+        let conn_state = Box::new(TftpConnState {
             remote_addr: RefCell::new(Some(remote_addr.clone())),
             main_remote_addr: remote_addr.clone(),
             trace_packets: true,

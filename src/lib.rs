@@ -1,4 +1,4 @@
-#![feature(proc_macro, conservative_impl_trait, generators, arbitrary_self_types)]
+#![feature(proc_macro, conservative_impl_trait, generators)]
 
 extern crate ascii;
 extern crate bytes;
