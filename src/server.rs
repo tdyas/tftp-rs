@@ -105,22 +105,32 @@ impl Sink for RawUdpStream {
     }
 }
 
+type OutgoingSink = Box<Sink<SinkItem=Datagram, SinkError=io::Error>>;
+type IncomingStream = Box<Stream<Item=Datagram, Error=io::Error>>;
+type IncomingFuture = Box<Future<Item=(Option<Datagram>, IncomingStream), Error=(io::Error, IncomingStream)>>;
+
+struct TftpConnStateInner {
+    outgoing: Option<OutgoingSink>,
+    incoming_future: Option<IncomingFuture>,
+    remaining_stream: Option<IncomingStream>,
+}
+
 struct TftpConnState {
     main_remote_addr: SocketAddr,
     remote_addr: RefCell<Option<SocketAddr>>,
+    handle: Handle,
 //    config: TftpConfig,
 //    file: File,
 //    current_block_num: u16,
 //    current_block_data: BytesMut,
     trace_packets: bool,
     max_retries: u16,
-    stream: RefCell<Option<RawUdpStream>>,
+    inner: RefCell<TftpConnStateInner>,
 }
 
 impl TftpConnState {
     #[async(boxed)]
     fn send_error(self: Box<Self>, code: u16, message: &'static [u8]) -> io::Result<()> {
-        let stream = self.stream.borrow_mut().take().unwrap();
         let remote_addr_opt = self.remote_addr.borrow_mut().take();
         if let Some(remote_addr) = remote_addr_opt {
             let error_packet = TftpPacket::Error { code: code, message: message };
@@ -128,10 +138,49 @@ impl TftpConnState {
             error_packet.encode(&mut buffer);
 
             let datagram = Datagram { addr: remote_addr, data: buffer.freeze() };
-            let stream = await!(stream.send(datagram))?;
-            self.stream.replace(Some(stream));
+            let sink = self.get_sink();
+            let sink = await!(sink.send(datagram))?;
+            self.put_sink(sink);
         }
         Ok(())
+    }
+
+    fn get_sink(&self) -> OutgoingSink {
+        let sink = self.inner.borrow_mut().outgoing.take().expect("multiple sends in flight");
+        sink
+    }
+
+    fn put_sink(&self, sink: OutgoingSink) {
+        self.inner.borrow_mut().outgoing = Some(sink);
+    }
+
+    fn get_incoming(&self) -> IncomingFuture {
+        let mut inner = self.inner.borrow_mut();
+        let incoming_future_opt = inner.incoming_future.take();
+        if let Some(incoming_future) = incoming_future_opt {
+            assert!(inner.remaining_stream.is_none());
+            return incoming_future;
+        } else {
+            let remaining_stream_opt = inner.remaining_stream.take();
+            if let Some(stream) = remaining_stream_opt {
+                let incoming_future = stream.into_future();
+                return Box::new(incoming_future);
+            } else {
+                panic!("no stream available");
+            }
+        }
+    }
+
+    fn put_incoming_future(&self, future: IncomingFuture) {
+        let mut inner = self.inner.borrow_mut();
+        assert!(inner.incoming_future.is_none() && inner.remaining_stream.is_none());
+        inner.incoming_future = Some(future);
+    }
+
+    fn put_incoming_stream(&self, stream: IncomingStream) {
+        let mut inner = self.inner.borrow_mut();
+        assert!(inner.incoming_future.is_none() && inner.remaining_stream.is_none());
+        inner.remaining_stream = Some(stream);
     }
 
     #[async(boxed)]
@@ -145,30 +194,44 @@ impl TftpConnState {
             println!("sending {}", &packet);
         }
 
-        let mut retries = 0;
+        let mut tries = 0;
 
-        while retries < self.max_retries {
+        while tries < self.max_retries {
+            tries += 1;
+
             // Construct the datagram to be sent to the remote.
             let remote_addr = self.remote_addr.borrow().unwrap_or(self.main_remote_addr);
             let datagram = Datagram { addr: remote_addr, data: bytes_to_send.clone() };
 
             // Send the packet to the remote.
-            let stream = self.stream.borrow_mut().take().unwrap();
-            let stream = await!(stream.send(datagram)).unwrap();
-            self.stream.replace(Some(stream));
+            let sink = self.get_sink();
+            let sink = await!(sink.send(datagram))?;
+            self.put_sink(sink);
 
             // Now wait for the remote to send us a response (with a timeout).
-//            let timeout = Timeout::new(Duration::new(2, 0), &self.handle);
-            let stream = self.stream.borrow_mut().take().unwrap();
-            let next_datagram_future = stream.into_future();
-            let next_datagram = match await!(next_datagram_future) {
-                Ok((next_datagram_opt, stream)) => {
-                    self.stream.replace(Some(stream));
-                    next_datagram_opt.expect("TODO: handle closure")
+            let timeout_future = Timeout::new(Duration::new(2, 0), &self.handle).unwrap();
+            let next_datagram_future = self.get_incoming();
+            let event_future = next_datagram_future.select2(timeout_future);
+
+            let event = await!(event_future);
+            let next_datagram = match event {
+                Ok(Either::A( ((next_datagram_opt, stream), _)  )) => {
+                    // Received datagram.
+                    self.put_incoming_stream(stream);
+                    next_datagram_opt.expect("TODO: handle stream closure")
                 },
-                Err((err, stream)) => {
-                    self.stream.replace(Some(stream));
-                    return Err(err)
+                Ok(Either::B( (_, future) )) => {
+                    // Timed out.
+                    self.put_incoming_future(future);
+                    continue;
+                },
+                Err(Either::A( ((err, stream), _) )) => {
+                    self.put_incoming_stream(stream);
+                    return Err(err);
+                },
+                Err(Either::B( (err, future) )) => {
+                    self.put_incoming_future(future);
+                    return Err(err);
                 },
             };
 
@@ -177,14 +240,11 @@ impl TftpConnState {
             }
 
             return Ok(Rc::new(next_datagram));
-
-            retries += 1;
         }
 
         // If we timed out while trying to receive a response, terminate the connection.
-        let stream = self.stream.borrow_mut().take().unwrap();
-        let remote_addr_opt = self.remote_addr.borrow_mut().take();
-        await!(self.send_error(0, b"timed out")).ok();
+        await!(self.send_error(0, b"timed out"))?;
+
         Err(io::Error::new(ErrorKind::TimedOut, "timed out"))
     }
 }
@@ -238,12 +298,19 @@ impl TftpServer {
         let reply_socket = UdpSocket::bind(&reply_bind_addr, &handle).unwrap();
         let reply_stream = RawUdpStream::new(reply_socket);
 
+        let (outgoing, incoming) = reply_stream.split();
+
         let conn_state = Box::new(TftpConnState {
             remote_addr: RefCell::new(Some(raw_request.addr.clone())),
             main_remote_addr: raw_request.addr.clone(),
+            handle: handle.clone(),
             trace_packets: true,
             max_retries: 5,
-            stream: RefCell::new(Some(reply_stream)),
+            inner: RefCell::new(TftpConnStateInner {
+                outgoing: Some(Box::new(outgoing)),
+                incoming_future: None,
+                remaining_stream: Some(Box::new(incoming)),
+            }),
         });
 
         let request = match TftpPacket::from_bytes(&raw_request.data[..]) {
@@ -259,7 +326,12 @@ impl TftpServer {
 
         match request {
             TftpPacket::ReadRequest { filename, .. } => {
-                handle.spawn(TftpServer::do_read_request(conn_state, filename.into_ascii_string().unwrap()).map_err(|_| ()))
+                let read_request_future = TftpServer::do_read_request(conn_state, filename.into_ascii_string().unwrap());
+
+                handle.spawn(read_request_future.map_err(|err| {
+                    println!("Error: {}", &err);
+                    ()
+                }));
             },
             _ => {
             },
