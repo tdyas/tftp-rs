@@ -38,7 +38,7 @@ impl TftpServer {
         let file = match File::open(path) {
             Ok(file) => file,
             Err(err) => {
-                await!(conn_state.send_error(1, b"File not found"));
+                let _ = await!(conn_state.send_error(1, b"File not found"));
                 return Err(err);
             },
         };
