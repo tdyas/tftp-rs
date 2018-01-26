@@ -1,13 +1,17 @@
+use std::cell::RefCell;
+use std::fs::File;
 use std::io;
-use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use ascii::{AsciiString, IntoAsciiString};
-use bytes::{BytesMut, BufMut};
+use bytes::{BufMut, BytesMut};
 use futures::prelude::*;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::Handle;
+use tokio_io::io::AllowStdIo;
+use tokio_io::io::read as tokio_read;
 
 use super::conn::TftpConnState;
 use super::proto::TftpPacket;
@@ -15,53 +19,92 @@ use super::udp_stream::{Datagram, RawUdpStream};
 
 pub struct TftpServer {
     incoming: Box<Future<Item=(), Error=io::Error>>,
-    root: PathBuf,
+}
+
+struct ReadState {
+    reader: RefCell<Option<io::BufReader<File>>>,
 }
 
 impl TftpServer {
     #[async(boxed)]
-    fn do_read_request(conn_state: Box<TftpConnState>, filename: AsciiString) -> io::Result<()> {
-        if filename != "foo.dat" {
-            await!(conn_state.send_error(1, b"File not found"));
-            return Ok(());
-        }
+    fn do_read_request(
+        req_state: Box<ReadState>,
+        conn_state: Rc<TftpConnState>,
+        filename: AsciiString,
+        _mode: AsciiString,
+        root: Rc<PathBuf>,
+    ) -> io::Result<()> {
+        let path = root.as_path().join(Path::new(&filename.to_string()));
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(err) => {
+                await!(conn_state.send_error(1, b"File not found"));
+                return Err(err);
+            },
+        };
+        let reader = io::BufReader::new(file);
+        req_state.reader.replace(Some(reader));
 
-        let data = {
-            let mut data = BytesMut::with_capacity(500);
-            for _ in 0..data.capacity() {
-                data.put_u8(0);
+        let mut current_block_num: u16 = 1;
+
+        loop {
+            // Read in the next block of data.
+            let mut file_buffer = BytesMut::with_capacity(512);
+            file_buffer.put_slice(&[0; 512]);
+            let reader = req_state.reader.borrow_mut().take().unwrap();
+            let (reader, file_buffer, n) = await!(tokio_read(AllowStdIo::new(reader), file_buffer))?;
+            req_state.reader.replace(Some(reader.into_inner()));
+
+            let data_packet_bytes = {
+                let packet = TftpPacket::Data {
+                    block: current_block_num,
+                    data: &file_buffer[0..n],
+                };
+                let mut buffer = BytesMut::with_capacity(16384);
+                packet.encode(&mut buffer);
+
+                buffer.freeze()
+            };
+
+            loop {
+                let local_conn_state = conn_state.clone();
+                let next_datagram = await!(local_conn_state.send_and_receive_next(data_packet_bytes.clone()))?;
+                let next_packet = TftpPacket::from_bytes(&next_datagram.data);
+                match next_packet {
+                    Ok(TftpPacket::Ack(block_num)) => {
+                        if block_num == current_block_num {
+                            current_block_num += 1;
+                            break;
+                        }
+                    },
+                    Ok(TftpPacket::Error { code, message }) => {
+                        println!("Client has error: code={}, message={}", code, message.into_ascii_string().unwrap());
+                        return Ok(());
+                    },
+                    Ok(ref packet) => {
+                        println!("Unexpected packet: {}", packet);
+                        return Ok(());
+                    },
+                    Err(err) => return Err(err),
+                }
             }
 
-            let packet = TftpPacket::Data { block: 1, data: &(data.freeze()) };
-            let mut buffer = BytesMut::with_capacity(16384);
-            packet.encode(&mut buffer);
-
-            buffer.freeze()
-        };
-
-        let next_datagram = await!(conn_state.send_and_receive_next(data))?;
-
-        let next_packet = TftpPacket::from_bytes(&next_datagram.data);
-        match next_packet {
-            Ok(TftpPacket::Ack(1)) => {
-                println!("Received proper ACK");
-            },
-            Err(err) => return Err(err),
-            _ => {
-                println!("unexpected state")
-            },
+            if n < 512 {
+                break;
+            }
         }
 
+        println!("Transfer done.");
         Ok(())
     }
 
-    fn do_request(raw_request: Datagram, handle: Handle) {
+    fn do_request(raw_request: Datagram, root: Rc<PathBuf>, handle: Handle) {
         // Bind a socket for this connection.
         let reply_bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let reply_socket = UdpSocket::bind(&reply_bind_addr, &handle).unwrap();
         let reply_stream = RawUdpStream::new(reply_socket);
 
-        let conn_state = Box::new(TftpConnState::new(reply_stream, raw_request.addr, &handle));
+        let conn_state = Rc::new(TftpConnState::new(reply_stream, raw_request.addr, &handle));
 
         let request = match TftpPacket::from_bytes(&raw_request.data[..]) {
             Ok(req) => {
@@ -75,8 +118,11 @@ impl TftpServer {
         };
 
         match request {
-            TftpPacket::ReadRequest { filename, .. } => {
-                let read_request_future = TftpServer::do_read_request(conn_state, filename.into_ascii_string().unwrap());
+            TftpPacket::ReadRequest { filename, mode, .. } => {
+                let filename = filename.into_ascii_string().unwrap();
+                let mode = mode.into_ascii_string().unwrap();
+                let read_state = Box::new(ReadState { reader: RefCell::new(None) });
+                let read_request_future = TftpServer::do_read_request(read_state, conn_state, filename, mode, root.clone());
 
                 handle.spawn(read_request_future.map_err(|err| {
                     println!("Error: {}", &err);
@@ -89,10 +135,10 @@ impl TftpServer {
     }
 
     #[async(boxed)]
-    fn main_loop(incoming: RawUdpStream, handle: Handle) -> io::Result<()> {
+    fn main_loop(incoming: RawUdpStream, root: Rc<PathBuf>, handle: Handle) -> io::Result<()> {
         #[async]
         for packet in incoming {
-            TftpServer::do_request(packet, handle.clone())
+            TftpServer::do_request(packet, root.clone(), handle.clone())
         }
         Ok(())
     }
@@ -102,17 +148,16 @@ impl TftpServer {
 
         let root = root.as_ref().to_path_buf();
         if !root.is_dir() {
-            return Err(Error::new(ErrorKind::InvalidInput, "not directory or does not exist"));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not directory or does not exist"));
         }
 
         let socket = UdpSocket::bind(addr, &handle)?;
         let stream = RawUdpStream::new(socket);
 
-        let incoming = TftpServer::main_loop(stream, handle.clone());
+        let incoming = TftpServer::main_loop(stream, Rc::new(root), handle.clone());
 
         Ok(TftpServer {
             incoming: incoming,
-            root: root.to_path_buf(),
         })
     }
 

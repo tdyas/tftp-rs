@@ -27,6 +27,7 @@ pub(crate) struct TftpConnState {
     remote_addr: RefCell<Option<SocketAddr>>,
     handle: Handle,
     trace_packets: bool,
+    block_size: u16,
     max_retries: u16,
     inner: RefCell<Inner>,
 }
@@ -40,6 +41,7 @@ impl TftpConnState {
             main_remote_addr: remote_addr.clone(),
             handle: handle.clone(),
             trace_packets: true,
+            block_size: 512,
             max_retries: 5,
             inner: RefCell::new(Inner {
                 outgoing: Some(Box::new(outgoing)),
@@ -49,8 +51,12 @@ impl TftpConnState {
         }
     }
 
+    pub fn block_size(&self) -> u16 {
+        return self.block_size;
+    }
+
     #[async(boxed)]
-    pub fn send_error(self: Box<Self>, code: u16, message: &'static [u8]) -> io::Result<()> {
+    pub fn send_error(self: Rc<Self>, code: u16, message: &'static [u8]) -> io::Result<()> {
         let remote_addr_opt = self.remote_addr.borrow_mut().take();
         if let Some(remote_addr) = remote_addr_opt {
             let error_packet = TftpPacket::Error { code: code, message: message };
@@ -105,7 +111,7 @@ impl TftpConnState {
 
     #[async(boxed)]
     pub fn send_and_receive_next(
-        self: Box<Self>,
+        self: Rc<Self>,
         bytes_to_send: Bytes,
     ) -> io::Result<Rc<Datagram>> {
 
