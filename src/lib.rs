@@ -11,7 +11,9 @@ extern crate tokio_proto;
 extern crate tokio_service;
 
 mod config;
+mod conn;
 mod proto;
 mod server;
+mod udp_stream;
 
 pub use server::TftpServer;

@@ -1,257 +1,20 @@
-use std::cell::RefCell;
-use std::fmt;
-use std::fs::File;
 use std::io;
 use std::io::{Error, ErrorKind};
-use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::time::Duration;
 
 use ascii::{AsciiString, IntoAsciiString};
-use bytes::{Bytes, BytesMut, BufMut};
-use futures::future::Either;
+use bytes::{BytesMut, BufMut};
 use futures::prelude::*;
-use futures::{Async, AsyncSink, Poll, Sink, StartSend, Stream};
 use tokio_core::net::UdpSocket;
-use tokio_core::reactor::{Handle, Timeout};
+use tokio_core::reactor::Handle;
 
-use super::config::TftpConfig;
+use super::conn::TftpConnState;
 use super::proto::TftpPacket;
-
-
-#[derive(Debug)]
-struct RawUdpStream {
-    socket: UdpSocket,
-    read_buffer: Vec<u8>,
-    write_buffer: Bytes,
-    out_addr: SocketAddr,
-}
-
-impl RawUdpStream {
-    pub fn new(socket: UdpSocket) -> RawUdpStream {
-        RawUdpStream {
-            socket: socket,
-            read_buffer: vec![0; 64 * 1024],
-            write_buffer: Bytes::default(),
-            out_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
-        }
-    }
-
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.socket.local_addr()
-    }
-}
-
-#[derive(Debug)]
-struct Datagram {
-    addr: SocketAddr,
-    data: Bytes,
-}
-
-impl fmt::Display for Datagram {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Packet(addr: {}, data: ? bytes)", self.addr)
-    }
-}
-
-impl Stream for RawUdpStream  {
-    type Item = Datagram;
-    type Error = io::Error;
-
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let (n, addr) = try_nb!(self.socket.recv_from(&mut self.read_buffer));
-        let data = Bytes::from(&self.read_buffer[..n]);
-        Ok(Async::Ready(Some(Datagram { addr,  data })))
-    }
-}
-
-impl Sink for RawUdpStream {
-    type SinkItem = Datagram;
-    type SinkError = io::Error;
-
-    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        if self.write_buffer.len() > 0 {
-            self.poll_complete()?;
-            if self.write_buffer.len() > 0 {
-                return Ok(AsyncSink::NotReady(item));
-            }
-        }
-
-        self.write_buffer = item.data;
-        self.out_addr = item.addr;
-        Ok(AsyncSink::Ready)
-    }
-
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        if self.write_buffer.is_empty() {
-            return Ok(Async::Ready(()))
-        }
-
-        let n = try_nb!(self.socket.send_to(&self.write_buffer, &self.out_addr));
-        let wrote_all = n == self.write_buffer.len();
-        self.write_buffer.clear();
-        if wrote_all {
-            Ok(Async::Ready(()))
-        } else {
-            Err(io::Error::new(io::ErrorKind::Other,
-                               "failed to write entire datagram to socket"))
-        }
-    }
-
-    fn close(&mut self) -> Poll<(), io::Error> {
-        try_ready!(self.poll_complete());
-        Ok(().into())
-    }
-}
-
-type OutgoingSink = Box<Sink<SinkItem=Datagram, SinkError=io::Error>>;
-type IncomingStream = Box<Stream<Item=Datagram, Error=io::Error>>;
-type IncomingFuture = Box<Future<Item=(Option<Datagram>, IncomingStream), Error=(io::Error, IncomingStream)>>;
-
-struct TftpConnStateInner {
-    outgoing: Option<OutgoingSink>,
-    incoming_future: Option<IncomingFuture>,
-    remaining_stream: Option<IncomingStream>,
-}
-
-struct TftpConnState {
-    main_remote_addr: SocketAddr,
-    remote_addr: RefCell<Option<SocketAddr>>,
-    handle: Handle,
-//    config: TftpConfig,
-//    file: File,
-//    current_block_num: u16,
-//    current_block_data: BytesMut,
-    trace_packets: bool,
-    max_retries: u16,
-    inner: RefCell<TftpConnStateInner>,
-}
-
-impl TftpConnState {
-    #[async(boxed)]
-    fn send_error(self: Box<Self>, code: u16, message: &'static [u8]) -> io::Result<()> {
-        let remote_addr_opt = self.remote_addr.borrow_mut().take();
-        if let Some(remote_addr) = remote_addr_opt {
-            let error_packet = TftpPacket::Error { code: code, message: message };
-            let mut buffer = BytesMut::with_capacity(200);
-            error_packet.encode(&mut buffer);
-
-            let datagram = Datagram { addr: remote_addr, data: buffer.freeze() };
-            let sink = self.get_sink();
-            let sink = await!(sink.send(datagram))?;
-            self.put_sink(sink);
-        }
-        Ok(())
-    }
-
-    fn get_sink(&self) -> OutgoingSink {
-        let sink = self.inner.borrow_mut().outgoing.take().expect("multiple sends in flight");
-        sink
-    }
-
-    fn put_sink(&self, sink: OutgoingSink) {
-        self.inner.borrow_mut().outgoing = Some(sink);
-    }
-
-    fn get_incoming(&self) -> IncomingFuture {
-        let mut inner = self.inner.borrow_mut();
-        let incoming_future_opt = inner.incoming_future.take();
-        if let Some(incoming_future) = incoming_future_opt {
-            assert!(inner.remaining_stream.is_none());
-            return incoming_future;
-        } else {
-            let remaining_stream_opt = inner.remaining_stream.take();
-            if let Some(stream) = remaining_stream_opt {
-                let incoming_future = stream.into_future();
-                return Box::new(incoming_future);
-            } else {
-                panic!("no stream available");
-            }
-        }
-    }
-
-    fn put_incoming_future(&self, future: IncomingFuture) {
-        let mut inner = self.inner.borrow_mut();
-        assert!(inner.incoming_future.is_none() && inner.remaining_stream.is_none());
-        inner.incoming_future = Some(future);
-    }
-
-    fn put_incoming_stream(&self, stream: IncomingStream) {
-        let mut inner = self.inner.borrow_mut();
-        assert!(inner.incoming_future.is_none() && inner.remaining_stream.is_none());
-        inner.remaining_stream = Some(stream);
-    }
-
-    #[async(boxed)]
-    fn send_and_receive_next(
-        self: Box<Self>,
-        bytes_to_send: Bytes,
-    ) -> io::Result<Rc<Datagram>> {
-
-        if self.trace_packets {
-            let packet = TftpPacket::from_bytes(&bytes_to_send).unwrap();
-            println!("sending {}", &packet);
-        }
-
-        let mut tries = 0;
-
-        while tries < self.max_retries {
-            tries += 1;
-
-            // Construct the datagram to be sent to the remote.
-            let remote_addr = self.remote_addr.borrow().unwrap_or(self.main_remote_addr);
-            let datagram = Datagram { addr: remote_addr, data: bytes_to_send.clone() };
-
-            // Send the packet to the remote.
-            let sink = self.get_sink();
-            let sink = await!(sink.send(datagram))?;
-            self.put_sink(sink);
-
-            // Now wait for the remote to send us a response (with a timeout).
-            let timeout_future = Timeout::new(Duration::new(2, 0), &self.handle).unwrap();
-            let next_datagram_future = self.get_incoming();
-            let event_future = next_datagram_future.select2(timeout_future);
-
-            let event = await!(event_future);
-            let next_datagram = match event {
-                Ok(Either::A( ((next_datagram_opt, stream), _)  )) => {
-                    // Received datagram.
-                    self.put_incoming_stream(stream);
-                    next_datagram_opt.expect("TODO: handle stream closure")
-                },
-                Ok(Either::B( (_, future) )) => {
-                    // Timed out.
-                    self.put_incoming_future(future);
-                    continue;
-                },
-                Err(Either::A( ((err, stream), _) )) => {
-                    self.put_incoming_stream(stream);
-                    return Err(err);
-                },
-                Err(Either::B( (err, future) )) => {
-                    self.put_incoming_future(future);
-                    return Err(err);
-                },
-            };
-
-            if self.remote_addr.borrow().is_none() {
-                self.remote_addr.replace(Some(next_datagram.addr));
-            }
-
-            return Ok(Rc::new(next_datagram));
-        }
-
-        // If we timed out while trying to receive a response, terminate the connection.
-        await!(self.send_error(0, b"timed out"))?;
-
-        Err(io::Error::new(ErrorKind::TimedOut, "timed out"))
-    }
-}
+use super::udp_stream::{Datagram, RawUdpStream};
 
 pub struct TftpServer {
     incoming: Box<Future<Item=(), Error=io::Error>>,
-    handle: Handle,
     root: PathBuf,
 }
 
@@ -298,20 +61,7 @@ impl TftpServer {
         let reply_socket = UdpSocket::bind(&reply_bind_addr, &handle).unwrap();
         let reply_stream = RawUdpStream::new(reply_socket);
 
-        let (outgoing, incoming) = reply_stream.split();
-
-        let conn_state = Box::new(TftpConnState {
-            remote_addr: RefCell::new(Some(raw_request.addr.clone())),
-            main_remote_addr: raw_request.addr.clone(),
-            handle: handle.clone(),
-            trace_packets: true,
-            max_retries: 5,
-            inner: RefCell::new(TftpConnStateInner {
-                outgoing: Some(Box::new(outgoing)),
-                incoming_future: None,
-                remaining_stream: Some(Box::new(incoming)),
-            }),
-        });
+        let conn_state = Box::new(TftpConnState::new(reply_stream, raw_request.addr, &handle));
 
         let request = match TftpPacket::from_bytes(&raw_request.data[..]) {
             Ok(req) => {
@@ -362,7 +112,6 @@ impl TftpServer {
 
         Ok(TftpServer {
             incoming: incoming,
-            handle: handle.clone(),
             root: root.to_path_buf(),
         })
     }
