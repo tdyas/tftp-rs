@@ -249,12 +249,12 @@ mod tests {
     use std::io;
     use std::net::SocketAddr;
 
-    use bytes::{Bytes, BytesMut};
+    use bytes::{BufMut, Bytes, BytesMut, IntoBuf};
     use futures::prelude::*;
     use tokio_core::net::UdpSocket;
     use tokio_core::reactor::{Core, Handle};
 
-    use super::{NullReaderFactory, TftpServer};
+    use super::{ReaderFactory, TftpServer};
     use super::super::proto::TftpPacket;
     use super::super::udp_stream::{Datagram, RawUdpStream};
 
@@ -288,6 +288,17 @@ mod tests {
     impl Error for TestError {
         fn description(&self) -> &str {
             self.0.as_str()
+        }
+    }
+
+    struct TestReaderFactory {
+        data: Bytes,
+    }
+
+    impl ReaderFactory for TestReaderFactory {
+        fn get_reader(&self, path: &str) -> io::Result<Box<io::Read>> {
+            let size = path.parse::<usize>().map_err(|_| io::ErrorKind::NotFound)?;
+            Ok(Box::new(self.data.slice(0, size).into_buf()))
         }
     }
 
@@ -387,11 +398,21 @@ mod tests {
 
     #[test]
     fn test_read_requests() {
+        let data = {
+            let mut b = BytesMut::with_capacity(2048);
+            for v in 0..b.capacity() {
+                b.put((v & 0xFF) as u8);
+            }
+            b.freeze()
+        };
+
+        let reader_factory = Box::new(TestReaderFactory { data: data });
+
         let mut core = Core::new().unwrap();
         let handle = core.handle();
 
         let server_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let server = TftpServer::bind(&server_addr, handle.clone(), Box::new(NullReaderFactory)).unwrap();
+        let server = TftpServer::bind(&server_addr, handle.clone(), reader_factory).unwrap();
         let server_addr = server.local_addr().clone();
 
         handle.spawn(server.map_err(|_| ()));
