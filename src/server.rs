@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::fs::File;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -38,11 +38,66 @@ impl ReaderFactory for FileReaderFactory {
     }
 }
 
+struct NullReaderFactory;
+
+impl ReaderFactory for NullReaderFactory {
+    fn get_reader(&self, _: &str) -> io::Result<Box<io::Read>> {
+        Err(io::Error::new(io::ErrorKind::NotFound, "file not found"))
+    }
+}
+
 struct ReadState {
     reader: RefCell<Option<Box<io::Read>>>,
 }
 
+pub struct Builder {
+    addr: Option<SocketAddr>,
+    handle: Option<Handle>,
+    reader_factory: Option<Box<ReaderFactory>>
+}
+
+impl Builder {
+    pub fn handle(mut self, handle: &Handle) -> Builder {
+        self.handle = Some(handle.clone());
+        self
+    }
+
+    pub fn addr(mut self, addr: SocketAddr) -> Builder {
+        self.addr = Some(addr);
+        self
+    }
+
+    pub fn port(self, port: u16) -> Builder {
+        self.addr(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port).into())
+    }
+
+    pub fn reader_factory(mut self, reader_factory: Box<ReaderFactory>) -> Builder {
+        self.reader_factory = Some(reader_factory);
+        self
+    }
+
+    pub fn read_root<P: AsRef<Path>>(self, path: P) -> Builder {
+        let root = path.as_ref().to_path_buf();
+        self.reader_factory(Box::new(FileReaderFactory { root: root }))
+    }
+
+    pub fn build(self) -> io::Result<TftpServer> {
+        let handle = self.handle.ok_or(io::Error::new(io::ErrorKind::InvalidInput, "no handle specified"))?;
+        let addr = self.addr.ok_or(io::Error::new(io::ErrorKind::InvalidInput, "mo address or port specified"))?;
+        let reader_factory = self.reader_factory.unwrap_or(Box::new(NullReaderFactory));
+        TftpServer::bind(&addr, handle, reader_factory)
+    }
+}
+
 impl TftpServer {
+    pub fn builder() -> Builder {
+        Builder {
+            handle: None,
+            addr: None,
+            reader_factory: None
+        }
+    }
+
     #[async(boxed)]
     fn do_read_request(
         read_state: Box<ReadState>,
@@ -158,19 +213,12 @@ impl TftpServer {
         Ok(())
     }
 
-    pub fn bind<P>(addr: &SocketAddr, handle: Handle, root: P) -> io::Result<TftpServer>
-        where P: AsRef<Path> {
-
-        let root = root.as_ref().to_path_buf();
-        if !root.is_dir() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not directory or does not exist"));
-        }
-
+    pub fn bind(addr: &SocketAddr, handle: Handle, reader_factory: Box<ReaderFactory>) -> io::Result<TftpServer> {
         let socket = UdpSocket::bind(addr, &handle)?;
         let stream = RawUdpStream::new(socket);
         let local_addr = stream.local_addr().unwrap();
 
-        let reader_factory = Rc::new(FileReaderFactory { root: root.as_path().to_path_buf() });
+        let reader_factory = Rc::from(reader_factory);
 
         let incoming = TftpServer::main_loop(stream, reader_factory, handle.clone());
 
@@ -200,14 +248,13 @@ mod tests {
     use std::fmt;
     use std::io;
     use std::net::SocketAddr;
-    use std::path::Path;
 
     use bytes::{Bytes, BytesMut};
     use futures::prelude::*;
     use tokio_core::net::UdpSocket;
     use tokio_core::reactor::{Core, Handle};
 
-    use super::TftpServer;
+    use super::{NullReaderFactory, TftpServer};
     use super::super::proto::TftpPacket;
     use super::super::udp_stream::{Datagram, RawUdpStream};
 
@@ -344,7 +391,7 @@ mod tests {
         let handle = core.handle();
 
         let server_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let server = TftpServer::bind(&server_addr, handle.clone(), Path::new(".")).unwrap();
+        let server = TftpServer::bind(&server_addr, handle.clone(), Box::new(NullReaderFactory)).unwrap();
         let server_addr = server.local_addr().clone();
 
         handle.spawn(server.map_err(|_| ()));
