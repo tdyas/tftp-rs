@@ -22,29 +22,43 @@ pub struct TftpServer {
     local_addr: SocketAddr,
 }
 
+pub trait ReaderFactory {
+    fn get_reader(&self, path: &str) -> io::Result<Box<io::Read>>;
+}
+
+struct FileReaderFactory {
+    root: PathBuf,
+}
+
+impl ReaderFactory for FileReaderFactory {
+    fn get_reader(&self, path: &str) -> io::Result<Box<io::Read>> {
+        let path = self.root.as_path().join(path);
+        let file = File::open(path)?;
+        Ok(Box::new(io::BufReader::new(file)))
+    }
+}
+
 struct ReadState {
-    reader: RefCell<Option<io::BufReader<File>>>,
+    reader: RefCell<Option<Box<io::Read>>>,
 }
 
 impl TftpServer {
     #[async(boxed)]
     fn do_read_request(
-        req_state: Box<ReadState>,
+        read_state: Box<ReadState>,
         conn_state: Rc<TftpConnState>,
         filename: AsciiString,
         _mode: AsciiString,
-        root: Rc<PathBuf>,
+        reader_factory: Rc<ReaderFactory>,
     ) -> io::Result<()> {
-        let path = root.as_path().join(Path::new(&filename.to_string()));
-        let file = match File::open(path) {
-            Ok(file) => file,
+        let reader = match reader_factory.get_reader(&filename.to_string()) {
+            Ok(rdr) => rdr,
             Err(err) => {
                 let _ = await!(conn_state.send_error(1, b"File not found"));
                 return Err(err);
             },
         };
-        let reader = io::BufReader::new(file);
-        req_state.reader.replace(Some(reader));
+        read_state.reader.replace(Some(reader));
 
         let mut current_block_num: u16 = 1;
 
@@ -52,9 +66,9 @@ impl TftpServer {
             // Read in the next block of data.
             let mut file_buffer = BytesMut::with_capacity(512);
             file_buffer.put_slice(&[0; 512]);
-            let reader = req_state.reader.borrow_mut().take().unwrap();
+            let reader = read_state.reader.borrow_mut().take().unwrap();
             let (reader, file_buffer, n) = await!(tokio_read(AllowStdIo::new(reader), file_buffer))?;
-            req_state.reader.replace(Some(reader.into_inner()));
+            read_state.reader.replace(Some(reader.into_inner()));
 
             let data_packet_bytes = {
                 let packet = TftpPacket::Data {
@@ -99,7 +113,7 @@ impl TftpServer {
         Ok(())
     }
 
-    fn do_request(raw_request: Datagram, root: Rc<PathBuf>, handle: Handle) {
+    fn do_request(raw_request: Datagram, reader_factory: Rc<ReaderFactory>, handle: Handle) {
         // Bind a socket for this connection.
         let reply_bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let reply_socket = UdpSocket::bind(&reply_bind_addr, &handle).unwrap();
@@ -123,7 +137,7 @@ impl TftpServer {
                 let filename = filename.into_ascii_string().unwrap();
                 let mode = mode.into_ascii_string().unwrap();
                 let read_state = Box::new(ReadState { reader: RefCell::new(None) });
-                let read_request_future = TftpServer::do_read_request(read_state, conn_state, filename, mode, root.clone());
+                let read_request_future = TftpServer::do_read_request(read_state, conn_state, filename, mode, reader_factory.clone());
 
                 handle.spawn(read_request_future.map_err(|err| {
                     println!("Error: {}", &err);
@@ -136,10 +150,10 @@ impl TftpServer {
     }
 
     #[async(boxed)]
-    fn main_loop(incoming: RawUdpStream, root: Rc<PathBuf>, handle: Handle) -> io::Result<()> {
+    fn main_loop(incoming: RawUdpStream, reader_factory: Rc<ReaderFactory>, handle: Handle) -> io::Result<()> {
         #[async]
         for packet in incoming {
-            TftpServer::do_request(packet, root.clone(), handle.clone())
+            TftpServer::do_request(packet, reader_factory.clone(), handle.clone())
         }
         Ok(())
     }
@@ -156,7 +170,9 @@ impl TftpServer {
         let stream = RawUdpStream::new(socket);
         let local_addr = stream.local_addr().unwrap();
 
-        let incoming = TftpServer::main_loop(stream, Rc::new(root), handle.clone());
+        let reader_factory = Rc::new(FileReaderFactory { root: root.as_path().to_path_buf() });
+
+        let incoming = TftpServer::main_loop(stream, reader_factory, handle.clone());
 
         Ok(TftpServer {
             incoming: incoming,
