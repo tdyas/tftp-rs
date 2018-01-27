@@ -83,7 +83,7 @@ impl Builder {
 
     pub fn build(self) -> io::Result<TftpServer> {
         let handle = self.handle.ok_or(io::Error::new(io::ErrorKind::InvalidInput, "no handle specified"))?;
-        let addr = self.addr.ok_or(io::Error::new(io::ErrorKind::InvalidInput, "mo address or port specified"))?;
+        let addr = self.addr.ok_or(io::Error::new(io::ErrorKind::InvalidInput, "no address or port specified"))?;
         let reader_factory = self.reader_factory.unwrap_or(Box::new(NullReaderFactory));
         TftpServer::bind(&addr, handle, reader_factory)
     }
