@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{metadata, File};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ pub struct TftpServer {
 }
 
 pub trait ReaderFactory {
-    fn get_reader(&self, path: &str) -> io::Result<Box<io::Read>>;
+    fn get_reader(&self, path: &str) -> io::Result<(Box<io::Read>, Option<usize>)>;
 }
 
 struct FileReaderFactory {
@@ -33,18 +33,23 @@ struct FileReaderFactory {
 }
 
 impl ReaderFactory for FileReaderFactory {
-    fn get_reader(&self, path: &str) -> io::Result<Box<io::Read>> {
+    fn get_reader(&self, path: &str) -> io::Result<(Box<io::Read>, Option<usize>)> {
         let path = self.root.as_path().join(path);
-        let file = File::open(path)?;
-        Ok(Box::new(io::BufReader::new(file)))
+        let stat = metadata(&path)?;
+        if stat.is_file() {
+            let file = File::open(&path)?;
+            Ok((Box::new(io::BufReader::new(file)), Some(stat.len() as usize)))
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
     }
 }
 
 struct NullReaderFactory;
 
 impl ReaderFactory for NullReaderFactory {
-    fn get_reader(&self, _: &str) -> io::Result<Box<io::Read>> {
-        Err(io::Error::new(io::ErrorKind::NotFound, "file not found"))
+    fn get_reader(&self, _: &str) -> io::Result<(Box<io::Read>, Option<usize>)> {
+        Err(io::Error::from(io::ErrorKind::NotFound))
     }
 }
 
@@ -109,8 +114,8 @@ impl TftpServer {
         options: HashMap<String, String>,
         reader_factory: Rc<ReaderFactory>,
     ) -> io::Result<()> {
-        let reader = match reader_factory.get_reader(&filename.to_string()) {
-            Ok(rdr) => rdr,
+        let (reader, size_opt) = match reader_factory.get_reader(&filename.to_string()) {
+            Ok((rdr, size_opt)) => (rdr, size_opt),
             Err(err) => {
                 let _ = await!(conn_state.send_error(ERR_FILE_NOT_FOUND, b"File not found"));
                 return Err(err);
@@ -141,6 +146,13 @@ impl TftpServer {
                     Err(_) => {
                         option_err = Some((ERR_INVALID_OPTIONS, b"Invalid blksize option"));
                     }
+                }
+            }
+            if let Some(tsize_str) = options.get("tsize") {
+                if tsize_str != "0" {
+                    option_err = Some((ERR_INVALID_OPTIONS, b"Invalid tsize option"));
+                } else if let Some(size) = size_opt {
+                    reply_options.insert(b"tsize", size.to_string().into_boxed_str());
                 }
             }
         }
@@ -368,9 +380,9 @@ mod tests {
     }
 
     impl ReaderFactory for TestReaderFactory {
-        fn get_reader(&self, path: &str) -> io::Result<Box<io::Read>> {
+        fn get_reader(&self, path: &str) -> io::Result<(Box<io::Read>, Option<usize>)> {
             let size = path.parse::<usize>().map_err(|_| io::ErrorKind::NotFound)?;
-            Ok(Box::new(self.data.slice(0, size).into_buf()))
+            Ok((Box::new(self.data.slice(0, size).into_buf()), Some(size)))
         }
     }
 
@@ -554,5 +566,18 @@ mod tests {
             Send(mk(Ack(2))),
         ]);
 
+        let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
+        options.insert(b"tsize", b"0");
+        let mut options1: HashMap<&[u8], &[u8]> = HashMap::new();
+        options1.insert(b"tsize", b"768");
+        run_test(&mut core, &server_addr, "tsize option", vec![
+            Send(mk(ReadRequest { filename: b"768", mode: b"octet", options: options })),
+            Receive(mk(OptionsAck(options1))),
+            Send(mk(Ack(0))),
+            Receive(mk(Data { block: 1, data: &data.slice(0, 512) })),
+            Send(mk(Ack(1))),
+            Receive(mk(Data { block: 2, data: &data.slice(512, 768) })),
+            Send(mk(Ack(2))),
+        ]);
     }
 }
