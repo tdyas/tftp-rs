@@ -432,5 +432,15 @@ mod tests {
             Receive(mk(Data { block: 2, data: &data.slice(512, 768) })),
             Send(mk(Ack(2))),
         ]);
+
+        run_test(&mut core, &server_addr, "block aligned read", vec![
+            Send(mk(ReadRequest { filename: b"1024", mode: b"octet" })),
+            Receive(mk(Data { block: 1, data: &data.slice(0, 512) })),
+            Send(mk(Ack(1))),
+            Receive(mk(Data { block: 2, data: &data.slice(512, 1024) })),
+            Send(mk(Ack(2))),
+            Receive(mk(Data { block: 3, data: &[] })),
+            Send(mk(Ack(3))),
+        ]);
     }
 }
