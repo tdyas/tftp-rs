@@ -117,6 +117,27 @@ impl<'req> TftpPacket<'req> {
             },
         }
     }
+
+    #[allow(dead_code)]
+    pub fn encoded_size(&self) -> usize {
+        match *self {
+            TftpPacket::ReadRequest { filename, mode } => {
+                2 + filename.len() + 1 + mode.len() + 1
+            },
+            TftpPacket::WriteRequest { filename, mode } => {
+                2 + filename.len() + 1 + mode.len() + 1
+            },
+            TftpPacket::Data { data, .. } => {
+                2 + 2 + data.len()
+            }
+            TftpPacket::Ack(_) => {
+                2 + 2
+            },
+            TftpPacket::Error { message, ..} => {
+                2 + 2 + message.len() + 1
+            },
+        }
+    }
 }
 
 impl<'a> fmt::Display for TftpPacket<'a> {

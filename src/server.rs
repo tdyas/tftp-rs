@@ -383,7 +383,7 @@ mod tests {
     }
 
     fn mk(packet: TftpPacket) -> Bytes {
-        let mut buffer = BytesMut::with_capacity(1024);
+        let mut buffer = BytesMut::with_capacity(packet.encoded_size());
         packet.encode(&mut buffer);
         buffer.freeze()
     }
