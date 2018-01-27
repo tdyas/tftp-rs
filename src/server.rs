@@ -406,7 +406,7 @@ mod tests {
             b.freeze()
         };
 
-        let reader_factory = Box::new(TestReaderFactory { data: data });
+        let reader_factory = Box::new(TestReaderFactory { data: data.clone() });
 
         let mut core = Core::new().unwrap();
         let handle = core.handle();
@@ -417,9 +417,20 @@ mod tests {
 
         handle.spawn(server.map_err(|_| ()));
 
+        use self::Op::*;
+        use self::TftpPacket::*;
+
         run_test(&mut core, &server_addr, "file not found", vec![
-            Op::Send(mk(TftpPacket::ReadRequest { filename: b"missing", mode: b"octet" })),
-            Op::Receive(mk(TftpPacket::Error { code: 1, message: b"File not found"})),
+            Send(mk(ReadRequest { filename: b"missing", mode: b"octet" })),
+            Receive(mk(Error { code: 1, message: b"File not found"})),
+        ]);
+
+        run_test(&mut core, &server_addr, "basic read request", vec![
+            Send(mk(ReadRequest { filename: b"768", mode: b"octet" })),
+            Receive(mk(Data { block: 1, data: &data.slice(0, 512) })),
+            Send(mk(Ack(1))),
+            Receive(mk(Data { block: 2, data: &data.slice(512, 768) })),
+            Send(mk(Ack(2))),
         ]);
     }
 }
