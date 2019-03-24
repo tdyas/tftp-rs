@@ -6,8 +6,6 @@ authors = ["Tom Dyas <tom@shoalsoftware.com>"]
 [dependencies]
 ascii = "0.8"
 bytes = "0.4"
-futures-await = "0.1"
-tokio-io = "0.1"
-tokio-core = "0.1"
-tokio-proto = "0.1"
-tokio-service = "0.1"
+#futures = { git = "https://github.com/rust-lang-nursery/futures-rs.git", rev = "b6f88f5911b0b9b158a15c49101cf8ab205a4be4", features = ["std", "nightly"] }
+futures-preview = "0.3.0-alpha.1"
+tokio = { git = "https://github.com/tokio-rs/tokio", rev = "3fecd0154c9e48ffbaf8d839ce5728b1c833d3de" }

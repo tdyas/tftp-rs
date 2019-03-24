@@ -2,12 +2,12 @@ use std::cell::RefCell;
 use std::io;
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Instant, Duration};
 
 use bytes::{Bytes, BytesMut};
-use futures::prelude::*;
 use futures::future::Either;
-use tokio_core::reactor::{Handle, Timeout};
+use futures::future;
+use tokio::timer::Delay;
 
 use super::proto::TftpPacket;
 use super::udp_stream::{Datagram, RawUdpStream};
@@ -25,20 +25,18 @@ struct Inner {
 pub(crate) struct TftpConnState {
     main_remote_addr: SocketAddr,
     remote_addr: RefCell<Option<SocketAddr>>,
-    handle: Handle,
     trace_packets: bool,
     max_retries: u16,
     inner: RefCell<Inner>,
 }
 
 impl TftpConnState {
-    pub fn new(stream: RawUdpStream, remote_addr: SocketAddr, handle: &Handle) -> TftpConnState {
+    pub fn new(stream: RawUdpStream, remote_addr: SocketAddr) -> TftpConnState {
         let (outgoing, incoming) = stream.split();
 
         TftpConnState {
             remote_addr: RefCell::new(Some(remote_addr.clone())),
             main_remote_addr: remote_addr.clone(),
-            handle: handle.clone(),
             trace_packets: true,
             max_retries: 5,
             inner: RefCell::new(Inner {
@@ -103,12 +101,10 @@ impl TftpConnState {
         inner.remaining_stream = Some(stream);
     }
 
-    #[async(boxed)]
     pub fn send_and_receive_next(
         self: Rc<Self>,
         bytes_to_send: Bytes,
     ) -> io::Result<Rc<Datagram>> {
-
         if self.trace_packets {
             let packet = TftpPacket::from_bytes(&bytes_to_send).unwrap();
             println!("sending {}", &packet);
@@ -129,27 +125,28 @@ impl TftpConnState {
             self.put_sink(sink);
 
             // Now wait for the remote to send us a response (with a timeout).
-            let timeout_future = Timeout::new(Duration::new(2, 0), &self.handle).unwrap();
+            let timeout_instant = Instant::now() + Duration::new(2, 0);
+            let timeout_future = Box::new(Delay::new(timeout_instant));
             let next_datagram_future = self.get_incoming();
-            let event_future = next_datagram_future.select2(timeout_future);
+            let event_future = next_datagram_future.select(timeout_future);
 
             let event = await!(event_future);
             let next_datagram = match event {
-                Ok(Either::A( ((next_datagram_opt, stream), _)  )) => {
+                Ok(Either::Left( ((next_datagram_opt, stream), _)  )) => {
                     // Received datagram.
                     self.put_incoming_stream(stream);
                     next_datagram_opt.expect("TODO: handle stream closure")
                 },
-                Ok(Either::B( (_, future) )) => {
+                Ok(Either::Right( (_, future) )) => {
                     // Timed out.
                     self.put_incoming_future(future);
                     continue;
                 },
-                Err(Either::A( ((err, stream), _) )) => {
+                Err(Either::Left( ((err, stream), _) )) => {
                     self.put_incoming_stream(stream);
                     return Err(err);
                 },
-                Err(Either::B( (err, future) )) => {
+                Err(Either::Right( (err, future) )) => {
                     self.put_incoming_future(future);
                     return Err(err);
                 },

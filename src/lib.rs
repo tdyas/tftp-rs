@@ -1,19 +1,16 @@
-#![feature(proc_macro, conservative_impl_trait, generators, arbitrary_self_types)]
+#![feature(proc_macro, generators, pin, arbitrary_self_types, extern_prelude, async_await, await_macro)]
 
 extern crate ascii;
 extern crate bytes;
 #[macro_use]
-extern crate futures_await as futures;
-#[macro_use]
-extern crate tokio_core;
-extern crate tokio_io;
-extern crate tokio_proto;
-extern crate tokio_service;
+extern crate futures;
+extern crate tokio;
 
 mod config;
 mod conn;
 mod proto;
 mod server;
 mod udp_stream;
+mod read;
 
 pub use server::TftpServer;

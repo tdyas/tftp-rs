@@ -8,15 +8,15 @@ use std::rc::Rc;
 
 use ascii::{AsciiString, IntoAsciiString};
 use bytes::{BufMut, BytesMut};
-use futures::prelude::*;
-use tokio_core::net::UdpSocket;
-use tokio_core::reactor::Handle;
-use tokio_io::io::AllowStdIo;
-use tokio_io::io::read as tokio_read;
+use futures::io::AllowStdIo;
+use tokio::net::UdpSocket;
+use tokio::reactor::Handle;
+use tokio;
 
 use super::conn::TftpConnState;
 use super::proto::{DEFAULT_BLOCK_SIZE, MIN_BLOCK_SIZE, MAX_BLOCK_SIZE, ERR_FILE_NOT_FOUND,
                    ERR_INVALID_OPTIONS, TftpPacket};
+use super::read::read as tokio_read;
 use super::udp_stream::{Datagram, RawUdpStream};
 
 pub struct TftpServer {
@@ -246,13 +246,13 @@ impl TftpServer {
         Ok(())
     }
 
-    fn do_request(raw_request: Datagram, reader_factory: Rc<ReaderFactory>, handle: Handle) {
+    fn do_request(raw_request: Datagram, reader_factory: Rc<ReaderFactory>) {
         // Bind a socket for this connection.
         let reply_bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let reply_socket = UdpSocket::bind(&reply_bind_addr, &handle).unwrap();
+        let reply_socket = UdpSocket::bind(&reply_bind_addr).unwrap();
         let reply_stream = RawUdpStream::new(reply_socket);
 
-        let conn_state = Rc::new(TftpConnState::new(reply_stream, raw_request.addr, &handle));
+        let conn_state = Rc::new(TftpConnState::new(reply_stream, raw_request.addr));
 
         let request = match TftpPacket::from_bytes(&raw_request.data[..]) {
             Ok(req) => {
@@ -278,7 +278,7 @@ impl TftpServer {
                 let read_request_future = TftpServer::do_read_request(read_state,
                                                                       conn_state, filename, mode, options, reader_factory.clone());
 
-                handle.spawn(read_request_future.map_err(|err| {
+                tokio::spawn(read_request_future.map_err(|err| {
                     println!("Error: {}", &err);
                     ()
                 }));
@@ -288,22 +288,22 @@ impl TftpServer {
     }
 
     #[async(boxed)]
-    fn main_loop(incoming: RawUdpStream, reader_factory: Rc<ReaderFactory>, handle: Handle) -> io::Result<()> {
+    fn main_loop(incoming: RawUdpStream, reader_factory: Rc<ReaderFactory>) -> io::Result<()> {
         #[async]
             for packet in incoming {
-            TftpServer::do_request(packet, reader_factory.clone(), handle.clone())
+            TftpServer::do_request(packet, reader_factory.clone())
         }
         Ok(())
     }
 
-    pub fn bind(addr: &SocketAddr, handle: Handle, reader_factory: Box<ReaderFactory>) -> io::Result<TftpServer> {
-        let socket = UdpSocket::bind(addr, &handle)?;
+    pub fn bind(addr: &SocketAddr, reader_factory: Box<ReaderFactory>) -> io::Result<TftpServer> {
+        let socket = UdpSocket::bind(addr)?;
         let stream = RawUdpStream::new(socket);
         let local_addr = stream.local_addr().unwrap();
 
         let reader_factory = Rc::from(reader_factory);
 
-        let incoming = TftpServer::main_loop(stream, reader_factory, handle.clone());
+        let incoming = TftpServer::main_loop(stream, reader_factory);
 
         Ok(TftpServer {
             incoming: incoming,
@@ -335,8 +335,8 @@ mod tests {
 
     use bytes::{BufMut, Bytes, BytesMut, IntoBuf};
     use futures::prelude::*;
-    use tokio_core::net::UdpSocket;
-    use tokio_core::reactor::{Core, Handle};
+    use tokio::net::UdpSocket;
+    use tokio;
 
     use super::{ReaderFactory, TftpServer};
     use super::super::proto::{ERR_INVALID_OPTIONS, TftpPacket};
@@ -450,9 +450,9 @@ mod tests {
         Ok(())
     }
 
-    fn do_test(server_addr: &SocketAddr, handle: Handle, steps: Vec<Op>) -> Box<Future<Item=(), Error=TestError>> {
+    fn do_test(server_addr: &SocketAddr, steps: Vec<Op>) -> Box<Future<Item=(), Error=TestError>> {
         let addr = "0.0.0.0:0".parse().unwrap();
-        let socket = UdpSocket::bind(&addr, &handle).unwrap();
+        let socket = UdpSocket::bind(&addr).unwrap();
         let stream = RawUdpStream::new(socket);
         let (sink, stream) = stream.split();
 
@@ -472,9 +472,9 @@ mod tests {
         buffer.freeze()
     }
 
-    fn run_test(core: &mut Core, server_addr: &SocketAddr, test_name: &str, steps: Vec<Op>) {
-        let test_driver = do_test(server_addr, core.handle(), steps);
-        let result = core.run(test_driver);
+    fn run_test(server_addr: &SocketAddr, test_name: &str, steps: Vec<Op>) {
+        let test_driver = do_test(server_addr, steps);
+        let result = tokio::run(test_driver);
         if let Err(err) = result {
             panic!("Test failed ({}): {}", test_name, err);
         }
@@ -492,24 +492,21 @@ mod tests {
 
         let reader_factory = Box::new(TestReaderFactory { data: data.clone() });
 
-        let mut core = Core::new().unwrap();
-        let handle = core.handle();
-
         let server_addr: SocketAddr = "0.0.0.0:5000".parse().unwrap();
-        let server = TftpServer::bind(&server_addr, handle.clone(), reader_factory).unwrap();
+        let server = TftpServer::bind(&server_addr, reader_factory).unwrap();
         let server_addr = server.local_addr().clone();
 
-        handle.spawn(server.map_err(|_| ()));
+        tokio::spawn(server.map_err(|_| ()));
 
         use self::Op::*;
         use self::TftpPacket::*;
 
-        run_test(&mut core, &server_addr, "file not found", vec![
+        run_test( &server_addr, "file not found", vec![
             Send(mk(ReadRequest { filename: b"missing", mode: b"octet", options: HashMap::default() })),
             Receive(mk(Error { code: 1, message: b"File not found" })),
         ]);
 
-        run_test(&mut core, &server_addr, "basic read request", vec![
+        run_test(&server_addr, "basic read request", vec![
             Send(mk(ReadRequest { filename: b"768", mode: b"octet", options: HashMap::default() })),
             Receive(mk(Data { block: 1, data: &data.slice(0, 512) })),
             Send(mk(Ack(1))),
@@ -517,7 +514,7 @@ mod tests {
             Send(mk(Ack(2))),
         ]);
 
-        run_test(&mut core, &server_addr, "block aligned read", vec![
+        run_test(&server_addr, "block aligned read", vec![
             Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: HashMap::default() })),
             Receive(mk(Data { block: 1, data: &data.slice(0, 512) })),
             Send(mk(Ack(1))),
@@ -529,14 +526,14 @@ mod tests {
 
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"blksize", b"3");
-        run_test(&mut core, &server_addr, "blksize option rejected (too small)", vec![
+        run_test(&server_addr, "blksize option rejected (too small)", vec![
             Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
             Receive(mk(Error { code: ERR_INVALID_OPTIONS, message: b"Invalid blksize option" })),
         ]);
 
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"blksize", b"xyzzy");
-        run_test(&mut core, &server_addr, "blksize option rejected (not a number)", vec![
+        run_test(&server_addr, "blksize option rejected (not a number)", vec![
             Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
             Receive(mk(Error { code: ERR_INVALID_OPTIONS, message: b"Invalid blksize option" })),
         ]);
@@ -545,7 +542,7 @@ mod tests {
         options.insert(b"blksize", b"65465");
         let mut options1: HashMap<&[u8], &[u8]> = HashMap::new();
         options1.insert(b"blksize", b"65464");
-        run_test(&mut core, &server_addr, "too large blksize option clamped", vec![
+        run_test(&server_addr, "too large blksize option clamped", vec![
             Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
             Receive(mk(OptionsAck(options1))),
             Send(mk(Ack(0))),
@@ -556,7 +553,7 @@ mod tests {
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"blksize", b"768");
         let options1 = options.clone();
-        run_test(&mut core, &server_addr, "larger blksize read", vec![
+        run_test(&server_addr, "larger blksize read", vec![
             Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
             Receive(mk(OptionsAck(options1))),
             Send(mk(Ack(0))),
@@ -570,7 +567,7 @@ mod tests {
         options.insert(b"tsize", b"0");
         let mut options1: HashMap<&[u8], &[u8]> = HashMap::new();
         options1.insert(b"tsize", b"768");
-        run_test(&mut core, &server_addr, "tsize option", vec![
+        run_test(&server_addr, "tsize option", vec![
             Send(mk(ReadRequest { filename: b"768", mode: b"octet", options: options })),
             Receive(mk(OptionsAck(options1))),
             Send(mk(Ack(0))),

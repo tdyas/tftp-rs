@@ -3,8 +3,8 @@ use std::io;
 use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
 
 use bytes::Bytes;
-use futures::prelude::*;
-use tokio_core::net::UdpSocket;
+use futures::task::Context;
+use tokio::net::UdpSocket;
 
 #[derive(Debug)]
 pub(crate) struct Datagram {
@@ -18,6 +18,16 @@ pub(crate) struct RawUdpStream {
     read_buffer: Vec<u8>,
     write_buffer: Bytes,
     out_addr: SocketAddr,
+}
+
+macro_rules! try_nb {
+    ($e:expr) => (match $e {
+        Ok(t) => t,
+        Err(ref e) if e.kind() == ::std::io::ErrorKind::WouldBlock => {
+            return Ok(::futures::Async::NotReady)
+        }
+        Err(e) => return Err(e.into()),
+    })
 }
 
 impl RawUdpStream {
@@ -38,7 +48,7 @@ impl RawUdpStream {
 
 impl fmt::Display for Datagram {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Packet(addr: {}, data: ? bytes)", self.addr)
+        write!(f, "Packet(addr: {}, data: ? bytes)", self.addr).unwrap()
     }
 }
 
@@ -46,7 +56,7 @@ impl Stream for RawUdpStream  {
     type Item = Datagram;
     type Error = io::Error;
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_next(&mut self, cx: &mut Context) -> Result<Async<Option<<Self as Stream>::Item>>, <Self as Stream>::Error> {
         let (n, addr) = try_nb!(self.socket.recv_from(&mut self.read_buffer));
         let data = Bytes::from(&self.read_buffer[..n]);
         Ok(Async::Ready(Some(Datagram { addr,  data })))
@@ -57,20 +67,23 @@ impl Sink for RawUdpStream {
     type SinkItem = Datagram;
     type SinkError = io::Error;
 
-    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+    fn poll_ready(&mut self, cx: &mut Context) -> Poll<(), Self::SinkError> {
         if self.write_buffer.len() > 0 {
             self.poll_complete()?;
             if self.write_buffer.len() > 0 {
-                return Ok(AsyncSink::NotReady(item));
+                return Ok(Async::Pending);
             }
         }
-
-        self.write_buffer = item.data;
-        self.out_addr = item.addr;
-        Ok(AsyncSink::Ready)
+        Ok(Async::Ready)
     }
 
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+    fn start_send(&mut self, item: Self::SinkItem) -> Result<(), Self::SinkError> {
+        self.write_buffer = item.data;
+        self.out_addr = item.addr;
+        Ok(Async::Ready)
+    }
+
+    fn poll_flush(&mut self, cx: &mut task::Context) -> Poll<(), Self::SinkError> {
         if self.write_buffer.is_empty() {
             return Ok(Async::Ready(()))
         }
@@ -86,7 +99,7 @@ impl Sink for RawUdpStream {
         }
     }
 
-    fn close(&mut self) -> Poll<(), io::Error> {
+    fn poll_close(&mut self, cx: &mut Context) -> Poll<(), Self::SinkError> {
         try_ready!(self.poll_complete());
         Ok(().into())
     }
