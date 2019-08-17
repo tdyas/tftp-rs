@@ -5,16 +5,17 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use futures::prelude::*;
-use futures::future::Either;
-use tokio_core::reactor::{Handle, Timeout};
+use tokio::timer::Timeout;
 
 use super::proto::TftpPacket;
 use super::udp_stream::{Datagram, RawUdpStream};
+use tokio::prelude::*;
+use tokio::reactor::Handle;
+use tokio::net::UdpSocket;
 
-type OutgoingSink = Box<Sink<SinkItem=Datagram, SinkError=io::Error>>;
-type IncomingStream = Box<Stream<Item=Datagram, Error=io::Error>>;
-type IncomingFuture = Box<Future<Item=(Option<Datagram>, IncomingStream), Error=(io::Error, IncomingStream)>>;
+type OutgoingSink = Box<dyn Sink<Datagram>>;
+type IncomingStream = Box<dyn Stream<Item=Datagram, Error=io::Error>>;
+type IncomingFuture = Box<dyn Future<Item=(Option<Datagram>, IncomingStream), Error=(io::Error, IncomingStream)>>;
 
 struct Inner {
     outgoing: Option<OutgoingSink>,
@@ -32,9 +33,7 @@ pub(crate) struct TftpConnState {
 }
 
 impl TftpConnState {
-    pub fn new(stream: RawUdpStream, remote_addr: SocketAddr, handle: &Handle) -> TftpConnState {
-        let (outgoing, incoming) = stream.split();
-
+    pub fn new(stream: UdpSocket, remote_addr: SocketAddr, handle: &Handle) -> TftpConnState {
         TftpConnState {
             remote_addr: RefCell::new(Some(remote_addr.clone())),
             main_remote_addr: remote_addr.clone(),
@@ -49,8 +48,7 @@ impl TftpConnState {
         }
     }
 
-    #[async(boxed)]
-    pub fn send_error(self: Rc<Self>, code: u16, message: &'static [u8]) -> io::Result<()> {
+    pub async fn send_error(self: Rc<Self>, code: u16, message: &'static [u8]) -> io::Result<()> {
         let remote_addr_opt = self.remote_addr.borrow_mut().take();
         if let Some(remote_addr) = remote_addr_opt {
             let error_packet = TftpPacket::Error { code: code, message: message };
@@ -58,8 +56,8 @@ impl TftpConnState {
             error_packet.encode(&mut buffer);
 
             let datagram = Datagram { addr: remote_addr, data: buffer.freeze() };
-            let sink = self.get_sink();
-            let sink = await!(sink.send(datagram))?;
+            let mut sink = self.get_sink();
+            let sink = sink.send(datagram).await?;
             self.put_sink(sink);
         }
         Ok(())
@@ -103,8 +101,7 @@ impl TftpConnState {
         inner.remaining_stream = Some(stream);
     }
 
-    #[async(boxed)]
-    pub fn send_and_receive_next(
+    pub async fn send_and_receive_next(
         self: Rc<Self>,
         bytes_to_send: Bytes,
     ) -> io::Result<Rc<Datagram>> {
@@ -124,8 +121,8 @@ impl TftpConnState {
             let datagram = Datagram { addr: remote_addr, data: bytes_to_send.clone() };
 
             // Send the packet to the remote.
-            let sink = self.get_sink();
-            let sink = await!(sink.send(datagram))?;
+            let mut sink = self.get_sink();
+            let sink = sink.send(datagram).await?;
             self.put_sink(sink);
 
             // Now wait for the remote to send us a response (with a timeout).
@@ -133,7 +130,7 @@ impl TftpConnState {
             let next_datagram_future = self.get_incoming();
             let event_future = next_datagram_future.select2(timeout_future);
 
-            let event = await!(event_future);
+            let event = event_future.await;
             let next_datagram = match event {
                 Ok(Either::A( ((next_datagram_opt, stream), _)  )) => {
                     // Received datagram.
@@ -163,7 +160,7 @@ impl TftpConnState {
         }
 
         // If we timed out while trying to receive a response, terminate the connection.
-        await!(self.send_error(0, b"timed out"))?;
+        self.send_error(0, b"timed out").await?;
 
         Err(io::Error::new(io::ErrorKind::TimedOut, "timed out"))
     }

@@ -3,8 +3,10 @@ use std::io;
 use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
 
 use bytes::Bytes;
-use futures::prelude::*;
-use tokio_core::net::UdpSocket;
+use tokio::net::UdpSocket;
+use tokio::prelude::*;
+use std::task::{Poll, Context};
+
 
 #[derive(Debug)]
 pub(crate) struct Datagram {
@@ -42,11 +44,10 @@ impl fmt::Display for Datagram {
     }
 }
 
-impl Stream for RawUdpStream  {
-    type Item = Datagram;
-    type Error = io::Error;
+impl Stream for RawUdpStream {
+    type Item = io::Result<Datagram>;
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_next(self, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let (n, addr) = try_nb!(self.socket.recv_from(&mut self.read_buffer));
         let data = Bytes::from(&self.read_buffer[..n]);
         Ok(Async::Ready(Some(Datagram { addr,  data })))
@@ -54,8 +55,8 @@ impl Stream for RawUdpStream  {
 }
 
 impl Sink for RawUdpStream {
-    type SinkItem = Datagram;
-    type SinkError = io::Error;
+    type Item = Datagram;
+    type Error = io::Error;
 
     fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
         if self.write_buffer.len() > 0 {
@@ -70,16 +71,16 @@ impl Sink for RawUdpStream {
         Ok(AsyncSink::Ready)
     }
 
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+    fn poll_complete(&mut self) -> Poll<()> {
         if self.write_buffer.is_empty() {
-            return Ok(Async::Ready(()))
+            return Ok(Poll::Ready(()))
         }
 
         let n = try_nb!(self.socket.send_to(&self.write_buffer, &self.out_addr));
         let wrote_all = n == self.write_buffer.len();
         self.write_buffer.clear();
         if wrote_all {
-            Ok(Async::Ready(()))
+            Ok(Poll::Ready(()))
         } else {
             Err(io::Error::new(io::ErrorKind::Other,
                                "failed to write entire datagram to socket"))

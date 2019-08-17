@@ -1,18 +1,16 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::{metadata, File};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use ascii::{AsciiString, IntoAsciiString};
-use bytes::{BufMut, BytesMut};
-use futures::prelude::*;
-use tokio_core::net::UdpSocket;
-use tokio_core::reactor::Handle;
-use tokio_io::io::AllowStdIo;
-use tokio_io::io::read as tokio_read;
+use bytes::{BufMut, Bytes, BytesMut};
+use tokio::net::UdpSocket;
+use tokio::reactor::Handle;
+use tokio::fs::File;
+use tokio::prelude::*;
 
 use super::conn::TftpConnState;
 use super::proto::{DEFAULT_BLOCK_SIZE, MIN_BLOCK_SIZE, MAX_BLOCK_SIZE, ERR_FILE_NOT_FOUND,
@@ -20,12 +18,12 @@ use super::proto::{DEFAULT_BLOCK_SIZE, MIN_BLOCK_SIZE, MAX_BLOCK_SIZE, ERR_FILE_
 use super::udp_stream::{Datagram, RawUdpStream};
 
 pub struct TftpServer {
-    incoming: Box<Future<Item=(), Error=io::Error>>,
+    incoming: Box<dyn Future<Item=(), Error=io::Error>>,
     local_addr: SocketAddr,
 }
 
 pub trait ReaderFactory {
-    fn get_reader(&self, path: &str) -> io::Result<(Box<io::Read>, Option<usize>)>;
+    fn get_reader(&self, path: &str) -> Box<dyn Future<io::Result<(Box<Bytes>, Option<usize>)>>>;
 }
 
 struct FileReaderFactory {
@@ -33,34 +31,40 @@ struct FileReaderFactory {
 }
 
 impl ReaderFactory for FileReaderFactory {
-    fn get_reader(&self, path: &str) -> io::Result<(Box<io::Read>, Option<usize>)> {
-        let path = self.root.as_path().join(path);
-        let stat = metadata(&path)?;
-        if stat.is_file() {
-            let file = File::open(&path)?;
-            Ok((Box::new(io::BufReader::new(file)), Some(stat.len() as usize)))
-        } else {
-            Err(io::Error::from(io::ErrorKind::NotFound))
-        }
+    fn get_reader(&self, path: &str) -> Box<dyn Future<io::Result<(Box<Bytes>, Option<usize>)>>>{
+        Box::new(async {
+            let path = self.root.as_path().join(path);
+            let stat = tokio::fs::metadata(&path).await?;
+            if stat.is_file() {
+                let mut file = File::open(&path).await?;
+                let mut contents = vec![];
+                file.read_to_end(&mut contents).await?;
+                Ok((Box::new(Bytes::from(contents)), Some(stat.len() as usize)))
+            } else {
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            }
+        })
     }
 }
 
 struct NullReaderFactory;
 
 impl ReaderFactory for NullReaderFactory {
-    fn get_reader(&self, _: &str) -> io::Result<(Box<io::Read>, Option<usize>)> {
-        Err(io::Error::from(io::ErrorKind::NotFound))
+    fn get_reader(&self, _: &str) -> Box<dyn Future<io::Result<(Box<Bytes>, Option<usize>)>>> {
+        Box::new(async {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        })
     }
 }
 
 struct ReadState {
-    reader: RefCell<Option<Box<io::Read>>>,
+    reader: RefCell<Option<Box<dyn io::Read>>>,
 }
 
 pub struct Builder {
     addr: Option<SocketAddr>,
     handle: Option<Handle>,
-    reader_factory: Option<Box<ReaderFactory>>,
+    reader_factory: Option<Box<dyn ReaderFactory>>,
 }
 
 impl Builder {
@@ -78,7 +82,7 @@ impl Builder {
         self.addr(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port).into())
     }
 
-    pub fn reader_factory(mut self, reader_factory: Box<ReaderFactory>) -> Builder {
+    pub fn reader_factory(mut self, reader_factory: Box<dyn ReaderFactory>) -> Builder {
         self.reader_factory = Some(reader_factory);
         self
     }
@@ -105,8 +109,7 @@ impl TftpServer {
         }
     }
 
-    #[async(boxed)]
-    fn do_read_request(
+    async fn do_read_request(
         read_state: Box<ReadState>,
         conn_state: Rc<TftpConnState>,
         filename: AsciiString,
@@ -117,7 +120,7 @@ impl TftpServer {
         let (reader, size_opt) = match reader_factory.get_reader(&filename.to_string()) {
             Ok((rdr, size_opt)) => (rdr, size_opt),
             Err(err) => {
-                let _ = await!(conn_state.send_error(ERR_FILE_NOT_FOUND, b"File not found"));
+                let _ = conn_state.send_error(ERR_FILE_NOT_FOUND, b"File not found").await;
                 return Err(err);
             }
         };
@@ -158,7 +161,7 @@ impl TftpServer {
         }
 
         if let Some((code, message)) = option_err {
-            let _ = await!(conn_state.send_error(code, message));
+            let _ = conn_state.send_error(code, message).await;
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
 
@@ -171,7 +174,7 @@ impl TftpServer {
                 buffer.freeze()
             };
             let local_conn_state = conn_state.clone();
-            let next_datagram = await!(local_conn_state.send_and_receive_next(bytes.clone()))?;
+            let next_datagram = local_conn_state.send_and_receive_next(bytes.clone()).await?;
             let next_packet = TftpPacket::from_bytes(&next_datagram.data);
             println!("Received packet: {:?}", &next_packet);
             match next_packet {
@@ -191,7 +194,7 @@ impl TftpServer {
         }
 
         if let Some((code, message)) = option_err {
-            let _ = await!(conn_state.send_error(code, message));
+            let _ = conn_state.send_error(code, message).await;
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
 
@@ -200,7 +203,7 @@ impl TftpServer {
             let mut file_buffer = BytesMut::with_capacity(block_size as usize);
             for _ in 0..block_size { file_buffer.put_u8(0); }
             let reader = read_state.reader.borrow_mut().take().unwrap();
-            let (reader, file_buffer, n) = await!(tokio_read(AllowStdIo::new(reader), file_buffer))?;
+            let (reader, file_buffer, n) = tokio_read(AllowStdIo::new(reader), file_buffer).await?;
             read_state.reader.replace(Some(reader.into_inner()));
 
             let data_packet_bytes = {
@@ -216,7 +219,7 @@ impl TftpServer {
 
             loop {
                 let local_conn_state = conn_state.clone();
-                let next_datagram = await!(local_conn_state.send_and_receive_next(data_packet_bytes.clone()))?;
+                let next_datagram = local_conn_state.send_and_receive_next(data_packet_bytes.clone()).await?;
                 let next_packet = TftpPacket::from_bytes(&next_datagram.data);
                 match next_packet {
                     Ok(TftpPacket::Ack(block_num)) => {
@@ -287,10 +290,8 @@ impl TftpServer {
         }
     }
 
-    #[async(boxed)]
-    fn main_loop(incoming: RawUdpStream, reader_factory: Rc<ReaderFactory>, handle: Handle) -> io::Result<()> {
-        #[async]
-            for packet in incoming {
+    async fn main_loop(incoming: RawUdpStream, reader_factory: Rc<ReaderFactory>, handle: Handle) -> io::Result<()> {
+        for packet in incoming {
             TftpServer::do_request(packet, reader_factory.clone(), handle.clone())
         }
         Ok(())
@@ -334,9 +335,9 @@ mod tests {
     use std::net::SocketAddr;
 
     use bytes::{BufMut, Bytes, BytesMut, IntoBuf};
-    use futures::prelude::*;
-    use tokio_core::net::UdpSocket;
-    use tokio_core::reactor::{Core, Handle};
+    use tokio::net::UdpSocket;
+    use tokio::reactor::Handle;
+    use tokio::prelude::*;
 
     use super::{ReaderFactory, TftpServer};
     use super::super::proto::{ERR_INVALID_OPTIONS, TftpPacket};
@@ -350,8 +351,8 @@ mod tests {
     struct TestContext {
         main_remote_addr: SocketAddr,
         remote_addr_opt: Option<SocketAddr>,
-        sink: Option<Box<Sink<SinkItem=Datagram, SinkError=io::Error>>>,
-        stream: Option<Box<Stream<Item=Datagram, Error=io::Error>>>,
+        sink: Option<Box<dyn Sink<Datagram>>>,
+        stream: Option<Box<dyn Stream<Item=Datagram, Error=io::Error>>>,
     }
 
     #[derive(Debug)]
@@ -386,8 +387,7 @@ mod tests {
         }
     }
 
-    #[async]
-    fn test_driver(context: Box<RefCell<TestContext>>, steps: Vec<Op>) -> Result<(), TestError> {
+    async fn test_driver(context: Box<RefCell<TestContext>>, steps: Vec<Op>) -> Result<(), TestError> {
         for step in steps {
             match step {
                 Op::Send(bytes) => {
@@ -397,8 +397,8 @@ mod tests {
 
                     let datagram = Datagram { addr: remote_addr, data: bytes };
 
-                    let sink = context.borrow_mut().sink.take().unwrap();
-                    let result = await!(sink.send(datagram));
+                    let mut sink = context.borrow_mut().sink.take().unwrap();
+                    let result = sink.send(datagram).await;
                     match result {
                         Ok(sink) => {
                             context.borrow_mut().sink = Some(Box::new(sink));
@@ -410,7 +410,7 @@ mod tests {
                 }
                 Op::Receive(bytes) => {
                     let stream = context.borrow_mut().stream.take().unwrap();
-                    let result = await!(stream.into_future());
+                    let result = stream.into_future().await;
 
                     let datagram_opt = match result {
                         Ok((datagram_opt, stream)) => {
