@@ -301,21 +301,19 @@ impl TftpServer {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::collections::HashMap;
     use std::error::Error;
     use std::fmt;
     use std::io;
     use std::net::SocketAddr;
 
-    use bytes::{BufMut, Bytes, BytesMut, IntoBuf};
+    use bytes::{BufMut, Bytes, BytesMut};
     use tokio::net::UdpSocket;
-    use tokio::reactor::Handle;
-    use tokio::prelude::*;
 
     use super::{ReaderFactory, TftpServer};
     use super::super::proto::{ERR_INVALID_OPTIONS, TftpPacket};
-    use super::super::conn::Datagram;
+
+    use async_trait::async_trait;
 
     enum Op {
         Send(Bytes),
@@ -325,8 +323,7 @@ mod tests {
     struct TestContext {
         main_remote_addr: SocketAddr,
         remote_addr_opt: Option<SocketAddr>,
-        sink: Option<Box<dyn Sink<Datagram>>>,
-        stream: Option<Box<dyn Stream<Item=Datagram, Error=io::Error>>>,
+        socket: UdpSocket,
     }
 
     #[derive(Debug)]
@@ -354,67 +351,47 @@ mod tests {
         data: Bytes,
     }
 
+    #[async_trait]
     impl ReaderFactory for TestReaderFactory {
-        fn get_reader(&self, path: &str) -> Box<dyn Future<io::Result<(Box<Bytes>, Option<usize>)>>> {
+        async fn get_reader(&self, path: &str) -> io::Result<Bytes> {
             let size = path.parse::<usize>().map_err(|_| io::ErrorKind::NotFound)?;
-            Ok((Box::new(self.data.slice(0, size).into_bytes()), Some(size)))
+            Ok(self.data.slice(0, size))
         }
     }
 
-    async fn test_driver(context: Box<RefCell<TestContext>>, steps: Vec<Op>) -> Result<(), TestError> {
+    async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<(), TestError> {
         for step in steps {
             match step {
                 Op::Send(bytes) => {
-                    let main_remote_addr = context.borrow().main_remote_addr;
-                    let remote_addr_opt = context.borrow().remote_addr_opt;
-                    let remote_addr = remote_addr_opt.unwrap_or(main_remote_addr);
-
-                    let datagram = Datagram { addr: remote_addr, data: bytes };
-
-                    let mut sink = context.borrow_mut().sink.take().unwrap();
-                    let result = sink.send(datagram).await;
+                    let remote_addr = context.remote_addr_opt.unwrap_or(context.main_remote_addr);
+                    let result = context.socket.send_to(&bytes, &remote_addr).await;
                     match result {
-                        Ok(sink) => {
-                            context.borrow_mut().sink = Some(Box::new(sink));
-                        }
+                        Ok(_) => {},
                         Err(err) => {
                             return Err(TestError::new(err.description()));
                         }
                     }
                 }
-                Op::Receive(bytes) => {
-                    let stream = context.borrow_mut().stream.take().unwrap();
-                    let result = stream.into_future().await;
-
-                    let datagram_opt = match result {
-                        Ok((datagram_opt, stream)) => {
-                            context.borrow_mut().stream = Some(Box::new(stream));
-                            datagram_opt
-                        }
-                        Err((err, stream)) => {
-                            context.borrow_mut().stream = Some(Box::new(stream));
-                            return Err(TestError::new(err.description()));
-                        }
-                    };
-
-                    match datagram_opt {
-                        Some(datagram) => {
-                            if context.borrow().remote_addr_opt.is_none() {
-                                context.borrow_mut().remote_addr_opt = Some(datagram.addr);
+                Op::Receive(expected_bytes) => {
+                    let buffer = BytesMut::with_capacity(65535);
+                    match context.socket.recv_from(&mut buffer).await {
+                        Ok((len, remote_addr)) => {
+                            if context.remote_addr_opt.is_none() {
+                                context.remote_addr_opt = Some(remote_addr);
                             }
-                            match TftpPacket::from_bytes(&datagram.data) {
+                            match TftpPacket::from_bytes(&buffer[0..len]) {
                                 Ok(packet) => {
                                     println!("Received {}", &packet);
                                 }
                                 Err(err) => return Err(TestError::new(err.description())),
                             };
-
-                            if bytes != datagram.data {
+                            let bytes = Bytes::from(&buffer[0..len]);
+                            if bytes != expected_bytes {
                                 return Err(TestError::new("Packets differ"));
                             }
-                        }
-                        None => {
-                            return Err(TestError::new("Stream terminated early."));
+                        },
+                        Err(err) => {
+                            return Err(TestError::new(err.description()));
                         }
                     }
                 }
@@ -424,18 +401,18 @@ mod tests {
         Ok(())
     }
 
-    fn do_test(server_addr: &SocketAddr, handle: Handle, steps: Vec<Op>) -> Box<Future<Item=(), Error=TestError>> {
+    async fn do_test(server_addr: &SocketAddr, steps: Vec<Op>) -> Result<(), TestError>{
         let addr = "0.0.0.0:0".parse().unwrap();
         let socket = UdpSocket::bind(&addr).unwrap();
 
-        let context = Box::new(RefCell::new(TestContext {
+        let context = TestContext {
             main_remote_addr: server_addr.clone(),
             remote_addr_opt: None,
-            sink: Some(Box::new(sink)),
-            stream: Some(Box::new(stream)),
-        }));
+            socket: socket,
+        };
 
-        Box::new(test_driver(context, steps))
+        test_driver(&mut context, steps).await?;
+        Ok(())
     }
 
     fn mk(packet: TftpPacket) -> Bytes {
@@ -444,16 +421,15 @@ mod tests {
         buffer.freeze()
     }
 
-    fn run_test(core: &mut Core, server_addr: &SocketAddr, test_name: &str, steps: Vec<Op>) {
-        let test_driver = do_test(server_addr, core.handle(), steps);
-        let result = core.run(test_driver);
+    async fn run_test(server_addr: &SocketAddr, test_name: &str, steps: Vec<Op>) {
+        let result = do_test(server_addr, steps).await;
         if let Err(err) = result {
             panic!("Test failed ({}): {}", test_name, err);
         }
     }
 
-    #[test]
-    fn test_read_requests() {
+    #[tokio::test]
+    async fn test_read_requests() {
         let data = {
             let mut b = BytesMut::with_capacity(2048);
             for v in 0..b.capacity() {
@@ -468,17 +444,20 @@ mod tests {
         let server = TftpServer::bind(&server_addr, reader_factory).unwrap();
         let server_addr = server.local_addr().clone();
 
-        handle.spawn(server.map_err(|_| ()));
+        tokio::spawn(async {
+            let _ = server.main_loop().await;
+            ()
+        });
 
         use self::Op::*;
         use self::TftpPacket::*;
 
-        run_test(&mut core, &server_addr, "file not found", vec![
+        run_test(&server_addr, "file not found", vec![
             Send(mk(ReadRequest { filename: b"missing", mode: b"octet", options: HashMap::default() })),
             Receive(mk(Error { code: 1, message: b"File not found" })),
         ]);
 
-        run_test(&mut core, &server_addr, "basic read request", vec![
+        run_test(&server_addr, "basic read request", vec![
             Send(mk(ReadRequest { filename: b"768", mode: b"octet", options: HashMap::default() })),
             Receive(mk(Data { block: 1, data: &data.slice(0, 512) })),
             Send(mk(Ack(1))),
@@ -486,7 +465,7 @@ mod tests {
             Send(mk(Ack(2))),
         ]);
 
-        run_test(&mut core, &server_addr, "block aligned read", vec![
+        run_test(&server_addr, "block aligned read", vec![
             Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: HashMap::default() })),
             Receive(mk(Data { block: 1, data: &data.slice(0, 512) })),
             Send(mk(Ack(1))),
@@ -498,14 +477,14 @@ mod tests {
 
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"blksize", b"3");
-        run_test(&mut core, &server_addr, "blksize option rejected (too small)", vec![
+        run_test(&server_addr, "blksize option rejected (too small)", vec![
             Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
             Receive(mk(Error { code: ERR_INVALID_OPTIONS, message: b"Invalid blksize option" })),
         ]);
 
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"blksize", b"xyzzy");
-        run_test(&mut core, &server_addr, "blksize option rejected (not a number)", vec![
+        run_test(&server_addr, "blksize option rejected (not a number)", vec![
             Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
             Receive(mk(Error { code: ERR_INVALID_OPTIONS, message: b"Invalid blksize option" })),
         ]);
@@ -514,7 +493,7 @@ mod tests {
         options.insert(b"blksize", b"65465");
         let mut options1: HashMap<&[u8], &[u8]> = HashMap::new();
         options1.insert(b"blksize", b"65464");
-        run_test(&mut core, &server_addr, "too large blksize option clamped", vec![
+        run_test(&server_addr, "too large blksize option clamped", vec![
             Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
             Receive(mk(OptionsAck(options1))),
             Send(mk(Ack(0))),
@@ -525,7 +504,7 @@ mod tests {
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"blksize", b"768");
         let options1 = options.clone();
-        run_test(&mut core, &server_addr, "larger blksize read", vec![
+        run_test(&server_addr, "larger blksize read", vec![
             Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
             Receive(mk(OptionsAck(options1))),
             Send(mk(Ack(0))),
@@ -539,7 +518,7 @@ mod tests {
         options.insert(b"tsize", b"0");
         let mut options1: HashMap<&[u8], &[u8]> = HashMap::new();
         options1.insert(b"tsize", b"768");
-        run_test(&mut core, &server_addr, "tsize option", vec![
+        run_test(&server_addr, "tsize option", vec![
             Send(mk(ReadRequest { filename: b"768", mode: b"octet", options: options })),
             Receive(mk(OptionsAck(options1))),
             Send(mk(Ack(0))),
