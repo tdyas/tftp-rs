@@ -1,17 +1,17 @@
-extern crate tokio_core;
+#![feature(async_await)]
+
 extern crate tftp_rs;
 
-use tokio_core::reactor::Core;
-
 use tftp_rs::TftpServer;
+use pin_utils::pin_mut;
 
-fn main() {
-    let mut core = Core::new().unwrap();
+#[tokio::main]
+async fn main() {
     let server = TftpServer::builder()
-        .handle(&core.handle())
         .port(9090)
         .read_root(".")
         .build()
         .unwrap();
-    core.run(server).unwrap();
+    pin_mut!(server);
+    let _ = server.main_loop().await;
 }

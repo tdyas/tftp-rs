@@ -1,78 +1,66 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use ascii::{AsciiString, IntoAsciiString};
-use bytes::{BufMut, Bytes, BytesMut};
+use async_trait::async_trait;
+use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
-use tokio::reactor::Handle;
 use tokio::fs::File;
 use tokio::prelude::*;
 
 use super::conn::TftpConnState;
 use super::proto::{DEFAULT_BLOCK_SIZE, MIN_BLOCK_SIZE, MAX_BLOCK_SIZE, ERR_FILE_NOT_FOUND,
                    ERR_INVALID_OPTIONS, TftpPacket};
-use super::udp_stream::{Datagram, RawUdpStream};
+use crate::conn::Datagram;
 
 pub struct TftpServer {
-    incoming: Box<dyn Future<Item=(), Error=io::Error>>,
+    socket: UdpSocket,
+    reader_factory: Box<dyn ReaderFactory>,
     local_addr: SocketAddr,
 }
 
+#[async_trait]
 pub trait ReaderFactory {
-    fn get_reader(&self, path: &str) -> Box<dyn Future<io::Result<(Box<Bytes>, Option<usize>)>>>;
+    async fn get_reader(&self, path: &str) -> io::Result<Bytes>;
 }
 
 struct FileReaderFactory {
     root: PathBuf,
 }
 
+#[async_trait]
 impl ReaderFactory for FileReaderFactory {
-    fn get_reader(&self, path: &str) -> Box<dyn Future<io::Result<(Box<Bytes>, Option<usize>)>>>{
-        Box::new(async {
-            let path = self.root.as_path().join(path);
-            let stat = tokio::fs::metadata(&path).await?;
-            if stat.is_file() {
-                let mut file = File::open(&path).await?;
-                let mut contents = vec![];
-                file.read_to_end(&mut contents).await?;
-                Ok((Box::new(Bytes::from(contents)), Some(stat.len() as usize)))
-            } else {
-                Err(io::Error::from(io::ErrorKind::NotFound))
-            }
-        })
+    async fn get_reader(&self, path: &str) -> io::Result<Bytes> {
+        let path = self.root.as_path().join(path).to_owned();
+        let stat = tokio::fs::metadata(path.clone()).await?;
+        if stat.is_file() {
+            let mut file = File::open(path.clone()).await?;
+            let mut contents = vec![];
+            file.read_to_end(&mut contents).await?;
+            Ok(Bytes::from(contents))
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
     }
 }
 
 struct NullReaderFactory;
 
+#[async_trait]
 impl ReaderFactory for NullReaderFactory {
-    fn get_reader(&self, _: &str) -> Box<dyn Future<io::Result<(Box<Bytes>, Option<usize>)>>> {
-        Box::new(async {
-            Err(io::Error::from(io::ErrorKind::NotFound))
-        })
+    async fn get_reader(&self, _path: &str) -> io::Result<Bytes> {
+        Err(io::Error::from(io::ErrorKind::NotFound))
     }
-}
-
-struct ReadState {
-    reader: RefCell<Option<Box<dyn io::Read>>>,
 }
 
 pub struct Builder {
     addr: Option<SocketAddr>,
-    handle: Option<Handle>,
     reader_factory: Option<Box<dyn ReaderFactory>>,
 }
 
 impl Builder {
-    pub fn handle(mut self, handle: &Handle) -> Builder {
-        self.handle = Some(handle.clone());
-        self
-    }
-
     pub fn addr(mut self, addr: SocketAddr) -> Builder {
         self.addr = Some(addr);
         self
@@ -93,43 +81,31 @@ impl Builder {
     }
 
     pub fn build(self) -> io::Result<TftpServer> {
-        let handle = self.handle.ok_or(io::Error::new(io::ErrorKind::InvalidInput, "no handle specified"))?;
         let addr = self.addr.ok_or(io::Error::new(io::ErrorKind::InvalidInput, "no address or port specified"))?;
         let reader_factory = self.reader_factory.unwrap_or(Box::new(NullReaderFactory));
-        TftpServer::bind(&addr, handle, reader_factory)
+        TftpServer::bind(&addr, reader_factory)
     }
 }
 
 impl TftpServer {
     pub fn builder() -> Builder {
         Builder {
-            handle: None,
             addr: None,
             reader_factory: None,
         }
     }
 
     async fn do_read_request(
-        read_state: Box<ReadState>,
-        conn_state: Rc<TftpConnState>,
-        filename: AsciiString,
+        mut conn_state: TftpConnState,
         _mode: AsciiString,
         options: HashMap<String, String>,
-        reader_factory: Rc<ReaderFactory>,
+        file_bytes: Bytes,
     ) -> io::Result<()> {
-        let (reader, size_opt) = match reader_factory.get_reader(&filename.to_string()) {
-            Ok((rdr, size_opt)) => (rdr, size_opt),
-            Err(err) => {
-                let _ = conn_state.send_error(ERR_FILE_NOT_FOUND, b"File not found").await;
-                return Err(err);
-            }
-        };
-        read_state.reader.replace(Some(reader));
-
         let mut current_block_num: u16 = 1;
         let mut block_size: u16 = DEFAULT_BLOCK_SIZE;
         let mut option_err: Option<(u16, &'static [u8])> = None;
         let mut reply_options: HashMap<&'static [u8], Box<str>> = HashMap::new();
+        let mut current_file_bytes_index: u16 = 0;
 
         if options.len() > 0 {
             if let Some(requested_block_size_str) = options.get("blksize") {
@@ -154,8 +130,8 @@ impl TftpServer {
             if let Some(tsize_str) = options.get("tsize") {
                 if tsize_str != "0" {
                     option_err = Some((ERR_INVALID_OPTIONS, b"Invalid tsize option"));
-                } else if let Some(size) = size_opt {
-                    reply_options.insert(b"tsize", size.to_string().into_boxed_str());
+                } else {
+                    reply_options.insert(b"tsize", file_bytes.len().to_string().into_boxed_str());
                 }
             }
         }
@@ -173,8 +149,7 @@ impl TftpServer {
                 packet.encode(&mut buffer);
                 buffer.freeze()
             };
-            let local_conn_state = conn_state.clone();
-            let next_datagram = local_conn_state.send_and_receive_next(bytes.clone()).await?;
+            let next_datagram = conn_state.send_and_receive_next(bytes.clone()).await?;
             let next_packet = TftpPacket::from_bytes(&next_datagram.data);
             println!("Received packet: {:?}", &next_packet);
             match next_packet {
@@ -200,16 +175,15 @@ impl TftpServer {
 
         loop {
             // Read in the next block of data.
-            let mut file_buffer = BytesMut::with_capacity(block_size as usize);
-            for _ in 0..block_size { file_buffer.put_u8(0); }
-            let reader = read_state.reader.borrow_mut().take().unwrap();
-            let (reader, file_buffer, n) = tokio_read(AllowStdIo::new(reader), file_buffer).await?;
-            read_state.reader.replace(Some(reader.into_inner()));
+            let mut n: u16 = file_bytes.len() as u16 - current_file_bytes_index;
+            if n > block_size {
+                n = block_size;
+            }
 
             let data_packet_bytes = {
                 let packet = TftpPacket::Data {
                     block: current_block_num,
-                    data: &file_buffer[0..n],
+                    data: &file_bytes[current_file_bytes_index as usize..n as usize],
                 };
                 let mut buffer = BytesMut::with_capacity(packet.encoded_size());
                 packet.encode(&mut buffer);
@@ -217,9 +191,10 @@ impl TftpServer {
                 buffer.freeze()
             };
 
+            current_file_bytes_index += n;
+
             loop {
-                let local_conn_state = conn_state.clone();
-                let next_datagram = local_conn_state.send_and_receive_next(data_packet_bytes.clone()).await?;
+                let next_datagram = conn_state.send_and_receive_next(data_packet_bytes.clone()).await?;
                 let next_packet = TftpPacket::from_bytes(&next_datagram.data);
                 match next_packet {
                     Ok(TftpPacket::Ack(block_num)) => {
@@ -240,7 +215,7 @@ impl TftpServer {
                 }
             }
 
-            if n < 512 {
+            if n < block_size {
                 break;
             }
         }
@@ -249,13 +224,12 @@ impl TftpServer {
         Ok(())
     }
 
-    fn do_request(raw_request: Datagram, reader_factory: Rc<ReaderFactory>, handle: Handle) {
+    async fn do_request(raw_request: Datagram, reader_factory: &Box<dyn ReaderFactory>) {
         // Bind a socket for this connection.
         let reply_bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let reply_socket = UdpSocket::bind(&reply_bind_addr, &handle).unwrap();
-        let reply_stream = RawUdpStream::new(reply_socket);
+        let reply_socket = UdpSocket::bind(&reply_bind_addr).unwrap();
 
-        let conn_state = Rc::new(TftpConnState::new(reply_stream, raw_request.addr, &handle));
+        let mut conn_state = TftpConnState::new(reply_socket, raw_request.addr);
 
         let request = match TftpPacket::from_bytes(&raw_request.data[..]) {
             Ok(req) => {
@@ -277,51 +251,51 @@ impl TftpServer {
                     let v = v.into_ascii_string().unwrap().to_string();
                     (k.to_ascii_lowercase(), v.to_ascii_lowercase())
                 }).collect::<HashMap<_, _>>();
-                let read_state = Box::new(ReadState { reader: RefCell::new(None) });
-                let read_request_future = TftpServer::do_read_request(read_state,
-                                                                      conn_state, filename, mode, options, reader_factory.clone());
 
-                handle.spawn(read_request_future.map_err(|err| {
-                    println!("Error: {}", &err);
+                let filename_copy = filename.to_string();
+                let file_bytes = match reader_factory.get_reader(&filename_copy).await {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        let _ = conn_state.send_error(ERR_FILE_NOT_FOUND, b"File not found").await;
+                        return;
+                    }
+                };
+
+                let read_fut = TftpServer::do_read_request(conn_state, mode, options, file_bytes.into());
+
+                tokio::spawn(async move {
+                    let _ = read_fut.await;
                     ()
-                }));
+                });
             }
             _ => {}
         }
+
+        ()
     }
 
-    async fn main_loop(incoming: RawUdpStream, reader_factory: Rc<ReaderFactory>, handle: Handle) -> io::Result<()> {
-        for packet in incoming {
-            TftpServer::do_request(packet, reader_factory.clone(), handle.clone())
+    pub async fn main_loop(&mut self) -> io::Result<()> {
+        let mut buffer = Vec::with_capacity(65535);
+        loop {
+            let (packet_length, remote_addr) = self.socket.recv_from(&mut buffer).await?;
+            let datagram = Datagram { data: Bytes::from(&buffer[0..packet_length]), addr: remote_addr};
+            TftpServer::do_request(datagram, &self.reader_factory).await;
         }
-        Ok(())
     }
 
-    pub fn bind(addr: &SocketAddr, handle: Handle, reader_factory: Box<ReaderFactory>) -> io::Result<TftpServer> {
-        let socket = UdpSocket::bind(addr, &handle)?;
-        let stream = RawUdpStream::new(socket);
-        let local_addr = stream.local_addr().unwrap();
-
-        let reader_factory = Rc::from(reader_factory);
-
-        let incoming = TftpServer::main_loop(stream, reader_factory, handle.clone());
+    pub fn bind(addr: &SocketAddr, reader_factory: Box<dyn ReaderFactory>) -> io::Result<TftpServer> {
+        let socket = UdpSocket::bind(addr)?;
+        let local_addr = socket.local_addr().unwrap();
 
         Ok(TftpServer {
-            incoming: incoming,
+            socket: socket,
+            reader_factory: reader_factory,
             local_addr: local_addr,
         })
     }
 
     pub fn local_addr(&self) -> &SocketAddr {
         &self.local_addr
-    }
-}
-
-impl Future for TftpServer {
-    type Item = ();
-    type Error = io::Error;
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.incoming.poll()
     }
 }
 
@@ -341,7 +315,7 @@ mod tests {
 
     use super::{ReaderFactory, TftpServer};
     use super::super::proto::{ERR_INVALID_OPTIONS, TftpPacket};
-    use super::super::udp_stream::{Datagram, RawUdpStream};
+    use super::super::conn::Datagram;
 
     enum Op {
         Send(Bytes),
@@ -381,9 +355,9 @@ mod tests {
     }
 
     impl ReaderFactory for TestReaderFactory {
-        fn get_reader(&self, path: &str) -> io::Result<(Box<io::Read>, Option<usize>)> {
+        fn get_reader(&self, path: &str) -> Box<dyn Future<io::Result<(Box<Bytes>, Option<usize>)>>> {
             let size = path.parse::<usize>().map_err(|_| io::ErrorKind::NotFound)?;
-            Ok((Box::new(self.data.slice(0, size).into_buf()), Some(size)))
+            Ok((Box::new(self.data.slice(0, size).into_bytes()), Some(size)))
         }
     }
 
@@ -452,9 +426,7 @@ mod tests {
 
     fn do_test(server_addr: &SocketAddr, handle: Handle, steps: Vec<Op>) -> Box<Future<Item=(), Error=TestError>> {
         let addr = "0.0.0.0:0".parse().unwrap();
-        let socket = UdpSocket::bind(&addr, &handle).unwrap();
-        let stream = RawUdpStream::new(socket);
-        let (sink, stream) = stream.split();
+        let socket = UdpSocket::bind(&addr).unwrap();
 
         let context = Box::new(RefCell::new(TestContext {
             main_remote_addr: server_addr.clone(),
@@ -492,11 +464,8 @@ mod tests {
 
         let reader_factory = Box::new(TestReaderFactory { data: data.clone() });
 
-        let mut core = Core::new().unwrap();
-        let handle = core.handle();
-
         let server_addr: SocketAddr = "0.0.0.0:5000".parse().unwrap();
-        let server = TftpServer::bind(&server_addr, handle.clone(), reader_factory).unwrap();
+        let server = TftpServer::bind(&server_addr, reader_factory).unwrap();
         let server_addr = server.local_addr().clone();
 
         handle.spawn(server.map_err(|_| ()));

@@ -52,7 +52,7 @@ impl<'req> TftpPacket<'req> {
             return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet: No type code."))
         }
 
-        let code = buf.get_u16::<BigEndian>();
+        let code = buf.get_u16_be();
         match code {
             1|2 => {
                 let strs = &bytes[2..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
@@ -88,7 +88,7 @@ impl<'req> TftpPacket<'req> {
                 if buf.remaining() < 2 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"))
                 }
-                let block = buf.get_u16::<BigEndian>();
+                let block = buf.get_u16_be();
                 let data = &bytes[4..];
                 Ok(TftpPacket::Data { block: block, data: data })
             },
@@ -96,13 +96,13 @@ impl<'req> TftpPacket<'req> {
                 if buf.remaining() < 2 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"))
                 }
-                Ok(TftpPacket::Ack(buf.get_u16::<BigEndian>()))
+                Ok(TftpPacket::Ack(buf.get_u16_be()))
             },
             5 => {
                 if buf.remaining() < 2 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"))
                 }
-                let code = buf.get_u16::<BigEndian>();
+                let code = buf.get_u16_be();
                 let strs = &bytes[4..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
                 if strs.len() < 1 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"))
@@ -134,7 +134,7 @@ impl<'req> TftpPacket<'req> {
     pub fn encode<B: BufMut>(&self, out: &mut B) {
         match *self {
             TftpPacket::ReadRequest { filename, mode, ref options } => {
-                out.put_u16::<BigEndian>(1);
+                out.put_u16_be(1);
                 out.put(filename);
                 out.put_u8(0);
                 out.put(mode);
@@ -147,7 +147,7 @@ impl<'req> TftpPacket<'req> {
                 }
             },
             TftpPacket::WriteRequest { filename, mode, ref options } => {
-                out.put_u16::<BigEndian>(2);
+                out.put_u16_be(2);
                 out.put(filename);
                 out.put_u8(0);
                 out.put(mode);
@@ -160,23 +160,23 @@ impl<'req> TftpPacket<'req> {
                 }
             },
             TftpPacket::Data { block, data } => {
-                out.put_u16::<BigEndian>(3);
-                out.put_u16::<BigEndian>(block);
+                out.put_u16_be(3);
+                out.put_u16_be(block);
                 out.put(data);
 
             }
             TftpPacket::Ack(block) => {
-                out.put_u16::<BigEndian>(4);
-                out.put_u16::<BigEndian>(block);
+                out.put_u16_be(4);
+                out.put_u16_be(block);
             },
             TftpPacket::Error { code, message } => {
-                out.put_u16::<BigEndian>(5);
-                out.put_u16::<BigEndian>(code);
+                out.put_u16_be(5);
+                out.put_u16_be(code);
                 out.put(message);
                 out.put_u8(0);
             },
             TftpPacket::OptionsAck(ref options) => {
-                out.put_u16::<BigEndian>(6);
+                out.put_u16_be(6);
                 for (&key, &value) in options.iter() {
                     out.put(key);
                     out.put_u8(0);
