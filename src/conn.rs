@@ -36,11 +36,14 @@ impl TftpConnState {
 
     pub async fn send_error(&mut self, code: u16, message: &'static [u8]) -> io::Result<()> {
         if let Some(remote_addr) = self.remote_addr {
-            let error_packet = TftpPacket::Error { code: code, message: message };
-            let mut buffer = BytesMut::with_capacity(200);
-            error_packet.encode(&mut buffer);
+            let bytes_to_send = {
+                let error_packet = TftpPacket::Error { code: code, message: message };
+                let mut buffer = BytesMut::with_capacity(65535);
+                error_packet.encode(&mut buffer);
+                buffer.freeze()
+            };
 
-            self.socket.send_to(&buffer, &remote_addr).await?;
+            self.socket.send_to(&bytes_to_send, &remote_addr).await?;
         }
         Ok(())
     }
@@ -63,7 +66,7 @@ impl TftpConnState {
             self.socket.send_to(&bytes_to_send, &remote_addr).await?;
 
             // Now wait for the remote to send us a response (with a timeout).
-            let mut buffer = Vec::with_capacity(65535);
+            let mut buffer: Vec<u8> = vec![0; 65535];
             let packet_future = self.socket.recv_from(&mut buffer);
             let timeout_future = Timeout::new(packet_future, Duration::new(2, 0));
 
