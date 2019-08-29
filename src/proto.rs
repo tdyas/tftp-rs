@@ -132,6 +132,15 @@ impl<'req> TftpPacket<'req> {
     }
 
     pub fn encode<B: BufMut>(&self, out: &mut B) {
+        fn encode_options<B: BufMut>(options: &HashMap<&[u8], &[u8]>, out: &mut B) {
+            for (&key, &value) in options.iter() {
+                out.put(key);
+                out.put_u8(0);
+                out.put(value);
+                out.put_u8(0);
+            }
+        }
+
         match *self {
             TftpPacket::ReadRequest { filename, mode, ref options } => {
                 out.put_u16_be(1);
@@ -139,12 +148,7 @@ impl<'req> TftpPacket<'req> {
                 out.put_u8(0);
                 out.put(mode);
                 out.put_u8(0);
-                for (&key, &value) in options.iter() {
-                    out.put(key);
-                    out.put_u8(0);
-                    out.put(value);
-                    out.put_u8(0);
-                }
+                encode_options(options, out);
             },
             TftpPacket::WriteRequest { filename, mode, ref options } => {
                 out.put_u16_be(2);
@@ -152,12 +156,7 @@ impl<'req> TftpPacket<'req> {
                 out.put_u8(0);
                 out.put(mode);
                 out.put_u8(0);
-                for (&key, &value) in options.iter() {
-                    out.put(key);
-                    out.put_u8(0);
-                    out.put(value);
-                    out.put_u8(0);
-                }
+                encode_options(options, out);
             },
             TftpPacket::Data { block, data } => {
                 out.put_u16_be(3);
