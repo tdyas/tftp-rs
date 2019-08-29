@@ -133,7 +133,9 @@ impl<'req> TftpPacket<'req> {
 
     pub fn encode<B: BufMut>(&self, out: &mut B) {
         fn encode_options<B: BufMut>(options: &HashMap<&[u8], &[u8]>, out: &mut B) {
-            for (&key, &value) in options.iter() {
+            let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = options.iter().map(|(k, v)| { ((*k).to_vec(), (*v).to_vec())}).collect();
+            pairs.sort();
+            for (key, value) in pairs {
                 out.put(key);
                 out.put_u8(0);
                 out.put(value);
