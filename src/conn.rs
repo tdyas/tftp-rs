@@ -34,6 +34,13 @@ impl TftpConnState {
         }
     }
 
+    pub async fn send(&mut self, bytes_to_send: &Bytes) -> io::Result<()> {
+        if let Some(remote_addr) = self.remote_addr {
+            self.socket.send_to(bytes_to_send, &remote_addr).await?;
+        }
+        Ok(())
+    }
+
     pub async fn send_error(&mut self, code: u16, message: &'static [u8]) -> io::Result<()> {
         if let Some(remote_addr) = self.remote_addr {
             let bytes_to_send = {
