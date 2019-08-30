@@ -80,10 +80,10 @@ impl Builder {
         self.reader_factory(Box::new(FileReaderFactory { root: root }))
     }
 
-    pub fn build(self) -> io::Result<TftpServer> {
+    pub async fn build(self) -> io::Result<TftpServer> {
         let addr = self.addr.ok_or(io::Error::new(io::ErrorKind::InvalidInput, "no address or port specified"))?;
         let reader_factory = self.reader_factory.unwrap_or(Box::new(NullReaderFactory) as Box<dyn ReaderFactory + Send + Sync>);
-        TftpServer::bind(&addr, reader_factory)
+        TftpServer::bind(&addr, reader_factory).await
     }
 }
 
@@ -227,7 +227,7 @@ impl TftpServer {
     async fn do_request(raw_request: Datagram, reader_factory: &Box<dyn ReaderFactory + Send + Sync>) {
         // Bind a socket for this connection.
         let reply_bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let reply_socket = UdpSocket::bind(&reply_bind_addr).unwrap();
+        let reply_socket = UdpSocket::bind(&reply_bind_addr).await.unwrap();
 
         let mut conn_state = TftpConnState::new(reply_socket, raw_request.addr);
         let request = match TftpPacket::from_bytes(&raw_request.data[..]) {
@@ -282,8 +282,8 @@ impl TftpServer {
         }
     }
 
-    pub fn bind(addr: &SocketAddr, reader_factory: Box<dyn ReaderFactory + Send + Sync>) -> io::Result<TftpServer> {
-        let socket = UdpSocket::bind(addr)?;
+    pub async fn bind(addr: &SocketAddr, reader_factory: Box<dyn ReaderFactory + Send + Sync>) -> io::Result<TftpServer> {
+        let socket = UdpSocket::bind(addr).await?;
         let local_addr = socket.local_addr().unwrap();
 
         Ok(TftpServer {
@@ -345,7 +345,7 @@ mod tests {
         let mut server = {
             let reader_factory = Box::new(TestReaderFactory { data: data.clone() }) as Box<dyn ReaderFactory + std::marker::Send + Sync>;
             let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            TftpServer::bind(&server_addr, reader_factory).unwrap()
+            TftpServer::bind(&server_addr, reader_factory).await.unwrap()
         };
         let server_addr = server.local_addr().clone();
 

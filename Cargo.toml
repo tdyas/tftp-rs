@@ -6,7 +6,8 @@ authors = ["Tom Dyas <tom@shoalsoftware.com>"]
 
 [dependencies]
 ascii = "0.9.2"
-bytes = "0.4.12"
-tokio = "=0.2.0-alpha.1"
 async-trait = "0.1.9"
+bytes = "0.4.12"
+futures-preview = { version = "=0.3.0-alpha.18", features = ["async-await", "nightly"] }
 pin-utils = "0.1.0-alpha.4"
+tokio = "=0.2.0-alpha.3"

@@ -1,5 +1,3 @@
-#![feature(async_await)]
-
 extern crate tftp_rs;
 
 use std::env;

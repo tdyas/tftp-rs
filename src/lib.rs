@@ -1,4 +1,4 @@
-#![feature(async_await)]
+#![feature(async_closure)]
 
 mod client;
 mod config;

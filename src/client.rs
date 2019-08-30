@@ -26,8 +26,8 @@ pub async fn tftp_get(address: &SocketAddr, filename: &[u8], mode: &[u8]) -> io:
     println!("tftp_get: address={:?}", address);
 
     // Bind a random but specific local socket for this request.
-    let socket_addr = "0.0.0.0:0".parse().unwrap();
-    let socket = UdpSocket::bind(&socket_addr).unwrap();
+    let socket_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let socket = UdpSocket::bind(&socket_addr).await.unwrap();
 
     let mut conn_state = TftpConnState::new(socket, address.to_owned());
 
@@ -154,4 +154,63 @@ pub async fn tftp_get(address: &SocketAddr, filename: &[u8], mode: &[u8]) -> io:
     }
 
     Ok(file_bytes.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use futures::try_join;
+    use tokio::prelude::*;
+    use tokio::net::UdpSocket;
+
+    use crate::client::tftp_get;
+    use crate::testing::*;
+    use std::collections::HashMap;
+    use std::error::Error;
+
+    async fn run_client_test<F>(test: impl FnOnce(SocketAddr) -> F, steps: Vec<Op>) -> Result<(), TestError>
+        where F: Future<Output=Result<(), TestError>> {
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("bind address");
+        let socket = UdpSocket::bind(&addr).await.expect("bind socket");
+        let server_addr = socket.local_addr().expect("server address");
+
+        let mut context = TestContext::new(socket, &server_addr);
+        let driver_fut = test_driver(&mut context, steps);
+
+        let test_fut = test(server_addr);
+
+        try_join!(test_fut, driver_fut).map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn test_get() {
+//        let data = {
+//            let mut b = BytesMut::with_capacity(2048);
+//            for v in 0..b.capacity() {
+//                b.put((v & 0xFF) as u8);
+//            }
+//            b.freeze()
+//        };
+
+        use Op::*;
+        use crate::proto::TftpPacket::*;
+
+        let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
+        options.insert(b"tsize", b"0");
+        options.insert(b"blksize", b"16384");
+        let result = run_client_test(async move |server_addr| {
+            let result = tftp_get(&server_addr, b"missing", b"octet").await;
+            let error = result.expect_err("error expected");
+            assert!(error.description().contains("File not found"));
+            Ok(())
+        }, vec![
+            Receive(mk(ReadRequest { filename: b"missing", mode: b"octet", options: options })),
+            Send(mk(Error { code: 1, message: b"File not found" })),
+        ]).await;
+        if result.is_err() {
+            panic!("Test failed: {}", result.unwrap_err());
+        }
+    }
 }

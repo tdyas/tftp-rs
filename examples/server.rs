@@ -1,5 +1,3 @@
-#![feature(async_await)]
-
 extern crate tftp_rs;
 
 use tftp_rs::TftpServer;
@@ -11,6 +9,7 @@ async fn main() {
         .port(9090)
         .read_root(".")
         .build()
+        .await
         .unwrap();
     pin_mut!(server);
     let _ = server.main_loop().await;

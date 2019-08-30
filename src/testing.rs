@@ -32,7 +32,7 @@ impl TestContext {
 pub struct TestError(String);
 
 impl TestError {
-    fn new(message: &str) -> TestError {
+    pub fn new(message: &str) -> TestError {
         TestError(message.to_owned())
     }
 }
@@ -50,8 +50,8 @@ impl Error for TestError {
 }
 
 pub async fn do_test(server_addr: &SocketAddr, steps: Vec<Op>) -> Result<(), TestError>{
-    let addr = "127.0.0.1:0".parse().unwrap();
-    let socket = UdpSocket::bind(&addr).unwrap();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let socket = UdpSocket::bind(&addr).await.unwrap();
 
     let mut context = TestContext::new(socket, &server_addr);
     test_driver(&mut context, steps).await?;
