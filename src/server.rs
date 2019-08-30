@@ -6,13 +6,15 @@ use std::path::{Path, PathBuf};
 use ascii::{AsciiString, IntoAsciiString};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use tokio::net::UdpSocket;
 use tokio::fs::File;
+use tokio::net::UdpSocket;
 use tokio::prelude::*;
 
-use crate::conn::{OwnedTftpPacket, TftpConnState, PacketCheckResult};
-use crate::proto::{DEFAULT_BLOCK_SIZE, MIN_BLOCK_SIZE, MAX_BLOCK_SIZE, ERR_FILE_NOT_FOUND,
-                   ERR_INVALID_OPTIONS, TftpPacket};
+use crate::conn::{OwnedTftpPacket, PacketCheckResult, TftpConnState};
+use crate::proto::{
+    TftpPacket, DEFAULT_BLOCK_SIZE, ERR_FILE_NOT_FOUND, ERR_INVALID_OPTIONS, MAX_BLOCK_SIZE,
+    MIN_BLOCK_SIZE,
+};
 
 pub struct TftpServer {
     socket: UdpSocket,
@@ -69,7 +71,10 @@ impl Builder {
         self.addr(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port).into())
     }
 
-    pub fn reader_factory(mut self, reader_factory: Box<dyn ReaderFactory + Send + Sync>) -> Builder {
+    pub fn reader_factory(
+        mut self,
+        reader_factory: Box<dyn ReaderFactory + Send + Sync>,
+    ) -> Builder {
         self.reader_factory = Some(reader_factory);
         self
     }
@@ -80,8 +85,13 @@ impl Builder {
     }
 
     pub async fn build(self) -> io::Result<TftpServer> {
-        let addr = self.addr.ok_or(io::Error::new(io::ErrorKind::InvalidInput, "no address or port specified"))?;
-        let reader_factory = self.reader_factory.unwrap_or(Box::new(NullReaderFactory) as Box<dyn ReaderFactory + Send + Sync>);
+        let addr = self.addr.ok_or(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no address or port specified",
+        ))?;
+        let reader_factory = self
+            .reader_factory
+            .unwrap_or(Box::new(NullReaderFactory) as Box<dyn ReaderFactory + Send + Sync>);
         TftpServer::bind(&addr, reader_factory).await
     }
 }
@@ -115,10 +125,12 @@ impl TftpServer {
                             option_err = Some((ERR_INVALID_OPTIONS, b"Invalid blksize option"));
                         } else if requested_block_size > MAX_BLOCK_SIZE {
                             block_size = MAX_BLOCK_SIZE;
-                            reply_options.insert(b"blksize", block_size.to_string().into_boxed_str());
+                            reply_options
+                                .insert(b"blksize", block_size.to_string().into_boxed_str());
                         } else {
                             block_size = requested_block_size;
-                            reply_options.insert(b"blksize", block_size.to_string().into_boxed_str());
+                            reply_options
+                                .insert(b"blksize", block_size.to_string().into_boxed_str());
                         }
                     }
                     Err(_) => {
@@ -142,18 +154,21 @@ impl TftpServer {
 
         if reply_options.len() > 0 {
             let bytes = {
-                let reply_options_1 = reply_options.iter().map(|(&k, ref v)| (k, v.as_bytes())).collect();
+                let reply_options_1 = reply_options
+                    .iter()
+                    .map(|(&k, ref v)| (k, v.as_bytes()))
+                    .collect();
                 let packet = TftpPacket::OptionsAck(reply_options_1);
                 let mut buffer = BytesMut::with_capacity(packet.encoded_size());
                 packet.encode(&mut buffer);
                 buffer.freeze()
             };
-            let _ = conn_state.send_and_receive_next(bytes.clone(), |packet| {
-                match packet {
+            let _ = conn_state
+                .send_and_receive_next(bytes.clone(), |packet| match packet {
                     TftpPacket::Ack(0) => PacketCheckResult::Accept,
                     _ => PacketCheckResult::Reject,
-                }
-            }).await?;
+                })
+                .await?;
         }
 
         if let Some((code, message)) = option_err {
@@ -171,7 +186,8 @@ impl TftpServer {
             let data_packet_bytes = {
                 let packet = TftpPacket::Data {
                     block: current_block_num,
-                    data: &file_bytes[current_file_bytes_index as usize..(current_file_bytes_index + n) as usize],
+                    data: &file_bytes[current_file_bytes_index as usize
+                        ..(current_file_bytes_index + n) as usize],
                 };
                 let mut buffer = BytesMut::with_capacity(packet.encoded_size());
                 packet.encode(&mut buffer);
@@ -181,8 +197,8 @@ impl TftpServer {
 
             current_file_bytes_index += n;
 
-            let _ = conn_state.send_and_receive_next(data_packet_bytes.clone(), |packet| {
-                match packet {
+            let _ = conn_state
+                .send_and_receive_next(data_packet_bytes.clone(), |packet| match packet {
                     TftpPacket::Ack(block_num) => {
                         if *block_num < current_block_num {
                             PacketCheckResult::Ignore
@@ -191,10 +207,10 @@ impl TftpServer {
                         } else {
                             PacketCheckResult::Reject
                         }
-                    },
+                    }
                     _ => PacketCheckResult::Reject,
-                }
-            }).await?;
+                })
+                .await?;
             current_block_num += 1;
 
             if n < block_size {
@@ -206,7 +222,10 @@ impl TftpServer {
         Ok(())
     }
 
-    async fn do_request(request: OwnedTftpPacket, reader_factory: &Box<dyn ReaderFactory + Send + Sync>) {
+    async fn do_request(
+        request: OwnedTftpPacket,
+        reader_factory: &Box<dyn ReaderFactory + Send + Sync>,
+    ) {
         // Bind a socket for this connection.
         let reply_bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let reply_socket = UdpSocket::bind(&reply_bind_addr).await.unwrap();
@@ -214,25 +233,35 @@ impl TftpServer {
         let mut conn_state = TftpConnState::new(reply_socket, Some(request.addr), None);
 
         match request.packet() {
-            TftpPacket::ReadRequest { filename, mode, ref options } => {
+            TftpPacket::ReadRequest {
+                filename,
+                mode,
+                ref options,
+            } => {
                 let filename = filename.into_ascii_string().unwrap();
                 let mode = mode.into_ascii_string().unwrap();
-                let options = options.iter().map(|(&k, &v)| {
-                    let k = k.into_ascii_string().unwrap().to_string();
-                    let v = v.into_ascii_string().unwrap().to_string();
-                    (k.to_ascii_lowercase(), v.to_ascii_lowercase())
-                }).collect::<HashMap<_, _>>();
+                let options = options
+                    .iter()
+                    .map(|(&k, &v)| {
+                        let k = k.into_ascii_string().unwrap().to_string();
+                        let v = v.into_ascii_string().unwrap().to_string();
+                        (k.to_ascii_lowercase(), v.to_ascii_lowercase())
+                    })
+                    .collect::<HashMap<_, _>>();
 
                 let filename_copy = filename.to_string();
                 let file_bytes = match reader_factory.get_reader(&filename_copy).await {
                     Ok(bytes) => bytes,
                     Err(_) => {
-                        let _ = conn_state.send_error(ERR_FILE_NOT_FOUND, b"File not found").await;
+                        let _ = conn_state
+                            .send_error(ERR_FILE_NOT_FOUND, b"File not found")
+                            .await;
                         return;
                     }
                 };
 
-                let read_fut = TftpServer::do_read_request(conn_state, mode, options, file_bytes.into());
+                let read_fut =
+                    TftpServer::do_read_request(conn_state, mode, options, file_bytes.into());
 
                 tokio::spawn(async move {
                     let _ = read_fut.await;
@@ -258,7 +287,10 @@ impl TftpServer {
         }
     }
 
-    pub async fn bind(addr: &SocketAddr, reader_factory: Box<dyn ReaderFactory + Send + Sync>) -> io::Result<TftpServer> {
+    pub async fn bind(
+        addr: &SocketAddr,
+        reader_factory: Box<dyn ReaderFactory + Send + Sync>,
+    ) -> io::Result<TftpServer> {
         let socket = UdpSocket::bind(addr).await?;
         let local_addr = socket.local_addr().unwrap();
 
@@ -283,7 +315,7 @@ mod tests {
     use bytes::{BufMut, Bytes, BytesMut};
 
     use super::{ReaderFactory, TftpServer};
-    use crate::proto::{ERR_INVALID_OPTIONS, TftpPacket};
+    use crate::proto::{TftpPacket, ERR_INVALID_OPTIONS};
 
     use crate::testing::*;
 
@@ -319,9 +351,12 @@ mod tests {
         };
 
         let mut server = {
-            let reader_factory = Box::new(TestReaderFactory { data: data.clone() }) as Box<dyn ReaderFactory + std::marker::Send + Sync>;
+            let reader_factory = Box::new(TestReaderFactory { data: data.clone() })
+                as Box<dyn ReaderFactory + std::marker::Send + Sync>;
             let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            TftpServer::bind(&server_addr, reader_factory).await.unwrap()
+            TftpServer::bind(&server_addr, reader_factory)
+                .await
+                .unwrap()
         };
         let server_addr = server.local_addr().clone();
 
@@ -333,80 +368,191 @@ mod tests {
         use self::Op::*;
         use self::TftpPacket::*;
 
-        run_test(&server_addr, "file not found", vec![
-            Send(mk(ReadRequest { filename: b"missing", mode: b"octet", options: HashMap::default() })),
-            Receive(mk(Error { code: 1, message: b"File not found" })),
-        ]).await;
+        run_test(
+            &server_addr,
+            "file not found",
+            vec![
+                Send(mk(ReadRequest {
+                    filename: b"missing",
+                    mode: b"octet",
+                    options: HashMap::default(),
+                })),
+                Receive(mk(Error {
+                    code: 1,
+                    message: b"File not found",
+                })),
+            ],
+        )
+        .await;
 
-        run_test(&server_addr, "basic read request", vec![
-            Send(mk(ReadRequest { filename: b"768", mode: b"octet", options: HashMap::default() })),
-            Receive(mk(Data { block: 1, data: &data.slice(0, 512) })),
-            Send(mk(Ack(1))),
-            Receive(mk(Data { block: 2, data: &data.slice(512, 768) })),
-            Send(mk(Ack(2))),
-        ]).await;
+        run_test(
+            &server_addr,
+            "basic read request",
+            vec![
+                Send(mk(ReadRequest {
+                    filename: b"768",
+                    mode: b"octet",
+                    options: HashMap::default(),
+                })),
+                Receive(mk(Data {
+                    block: 1,
+                    data: &data.slice(0, 512),
+                })),
+                Send(mk(Ack(1))),
+                Receive(mk(Data {
+                    block: 2,
+                    data: &data.slice(512, 768),
+                })),
+                Send(mk(Ack(2))),
+            ],
+        )
+        .await;
 
-        run_test(&server_addr, "block aligned read", vec![
-            Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: HashMap::default() })),
-            Receive(mk(Data { block: 1, data: &data.slice(0, 512) })),
-            Send(mk(Ack(1))),
-            Receive(mk(Data { block: 2, data: &data.slice(512, 1024) })),
-            Send(mk(Ack(2))),
-            Receive(mk(Data { block: 3, data: &[] })),
-            Send(mk(Ack(3))),
-        ]).await;
+        run_test(
+            &server_addr,
+            "block aligned read",
+            vec![
+                Send(mk(ReadRequest {
+                    filename: b"1024",
+                    mode: b"octet",
+                    options: HashMap::default(),
+                })),
+                Receive(mk(Data {
+                    block: 1,
+                    data: &data.slice(0, 512),
+                })),
+                Send(mk(Ack(1))),
+                Receive(mk(Data {
+                    block: 2,
+                    data: &data.slice(512, 1024),
+                })),
+                Send(mk(Ack(2))),
+                Receive(mk(Data {
+                    block: 3,
+                    data: &[],
+                })),
+                Send(mk(Ack(3))),
+            ],
+        )
+        .await;
 
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"blksize", b"3");
-        run_test(&server_addr, "blksize option rejected (too small)", vec![
-            Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
-            Receive(mk(Error { code: ERR_INVALID_OPTIONS, message: b"Invalid blksize option" })),
-        ]).await;
+        run_test(
+            &server_addr,
+            "blksize option rejected (too small)",
+            vec![
+                Send(mk(ReadRequest {
+                    filename: b"1024",
+                    mode: b"octet",
+                    options: options,
+                })),
+                Receive(mk(Error {
+                    code: ERR_INVALID_OPTIONS,
+                    message: b"Invalid blksize option",
+                })),
+            ],
+        )
+        .await;
 
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"blksize", b"xyzzy");
-        run_test(&server_addr, "blksize option rejected (not a number)", vec![
-            Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
-            Receive(mk(Error { code: ERR_INVALID_OPTIONS, message: b"Invalid blksize option" })),
-        ]).await;
+        run_test(
+            &server_addr,
+            "blksize option rejected (not a number)",
+            vec![
+                Send(mk(ReadRequest {
+                    filename: b"1024",
+                    mode: b"octet",
+                    options: options,
+                })),
+                Receive(mk(Error {
+                    code: ERR_INVALID_OPTIONS,
+                    message: b"Invalid blksize option",
+                })),
+            ],
+        )
+        .await;
 
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"blksize", b"65465");
         let mut options1: HashMap<&[u8], &[u8]> = HashMap::new();
         options1.insert(b"blksize", b"65464");
-        run_test(&server_addr, "too large blksize option clamped", vec![
-            Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
-            Receive(mk(OptionsAck(options1))),
-            Send(mk(Ack(0))),
-            Receive(mk(Data { block: 1, data: &data.slice(0, 1024) })),
-            Send(mk(Ack(1))),
-        ]).await;
+        run_test(
+            &server_addr,
+            "too large blksize option clamped",
+            vec![
+                Send(mk(ReadRequest {
+                    filename: b"1024",
+                    mode: b"octet",
+                    options: options,
+                })),
+                Receive(mk(OptionsAck(options1))),
+                Send(mk(Ack(0))),
+                Receive(mk(Data {
+                    block: 1,
+                    data: &data.slice(0, 1024),
+                })),
+                Send(mk(Ack(1))),
+            ],
+        )
+        .await;
 
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"blksize", b"768");
         let options1 = options.clone();
-        run_test(&server_addr, "larger blksize read", vec![
-            Send(mk(ReadRequest { filename: b"1024", mode: b"octet", options: options })),
-            Receive(mk(OptionsAck(options1))),
-            Send(mk(Ack(0))),
-            Receive(mk(Data { block: 1, data: &data.slice(0, 768) })),
-            Send(mk(Ack(1))),
-            Receive(mk(Data { block: 2, data: &data.slice(768, 1024) })),
-            Send(mk(Ack(2))),
-        ]).await;
+        run_test(
+            &server_addr,
+            "larger blksize read",
+            vec![
+                Send(mk(ReadRequest {
+                    filename: b"1024",
+                    mode: b"octet",
+                    options: options,
+                })),
+                Receive(mk(OptionsAck(options1))),
+                Send(mk(Ack(0))),
+                Receive(mk(Data {
+                    block: 1,
+                    data: &data.slice(0, 768),
+                })),
+                Send(mk(Ack(1))),
+                Receive(mk(Data {
+                    block: 2,
+                    data: &data.slice(768, 1024),
+                })),
+                Send(mk(Ack(2))),
+            ],
+        )
+        .await;
 
         let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
         options.insert(b"tsize", b"0");
         let mut options1: HashMap<&[u8], &[u8]> = HashMap::new();
         options1.insert(b"tsize", b"768");
-        run_test(&server_addr, "tsize option", vec![
-            Send(mk(ReadRequest { filename: b"768", mode: b"octet", options: options })),
-            Receive(mk(OptionsAck(options1))),
-            Send(mk(Ack(0))),
-            Receive(mk(Data { block: 1, data: &data.slice(0, 512) })),
-            Send(mk(Ack(1))),
-            Receive(mk(Data { block: 2, data: &data.slice(512, 768) })),
-            Send(mk(Ack(2))),
-        ]).await;
+        run_test(
+            &server_addr,
+            "tsize option",
+            vec![
+                Send(mk(ReadRequest {
+                    filename: b"768",
+                    mode: b"octet",
+                    options: options,
+                })),
+                Receive(mk(OptionsAck(options1))),
+                Send(mk(Ack(0))),
+                Receive(mk(Data {
+                    block: 1,
+                    data: &data.slice(0, 512),
+                })),
+                Send(mk(Ack(1))),
+                Receive(mk(Data {
+                    block: 2,
+                    data: &data.slice(512, 768),
+                })),
+                Send(mk(Ack(2))),
+            ],
+        )
+        .await;
     }
 }

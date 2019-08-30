@@ -6,8 +6,8 @@ use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
 
 use crate::proto::TftpPacket;
-use tokio::timer::Timeout;
 use std::time::Duration;
+use tokio::timer::Timeout;
 
 pub enum Op {
     Send(Bytes),
@@ -51,7 +51,7 @@ impl Error for TestError {
     }
 }
 
-pub async fn do_test(server_addr: &SocketAddr, steps: Vec<Op>) -> Result<(), TestError>{
+pub async fn do_test(server_addr: &SocketAddr, steps: Vec<Op>) -> Result<(), TestError> {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let socket = UdpSocket::bind(&addr).await.unwrap();
 
@@ -73,7 +73,7 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
                 let remote_addr = context.remote_addr_opt.unwrap_or(context.main_remote_addr);
                 let result = context.socket.send_to(&bytes, &remote_addr).await;
                 match result {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(err) => {
                         return Err(TestError::new(err.description()));
                     }
@@ -98,10 +98,10 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
                         if bytes != expected_bytes {
                             return Err(TestError::new("Packets differ"));
                         }
-                    },
+                    }
                     Ok(Err(err)) => {
                         return Err(TestError::new(err.description()));
-                    },
+                    }
                     Err(_) => return Err(TestError::new("timed out while waiting for packet")),
                 }
             }

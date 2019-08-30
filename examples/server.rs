@@ -1,7 +1,7 @@
 extern crate tftp_rs;
 
-use tftp_rs::TftpServer;
 use pin_utils::pin_mut;
+use tftp_rs::TftpServer;
 
 #[tokio::main]
 async fn main() {

@@ -11,15 +11,15 @@ pub const DEFAULT_BLOCK_SIZE: u16 = 512;
 pub const MIN_BLOCK_SIZE: u16 = 4;
 pub const MAX_BLOCK_SIZE: u16 = 65464;
 
-pub const ERR_NOT_DEFINED: u16         = 0; // Not defined, see error message (if any).
-pub const ERR_FILE_NOT_FOUND: u16      = 1; // File not found.
-pub const ERR_ACCESS_VIOLATION: u16    = 2; // Access violation.
-pub const ERR_DISK_FULL: u16           = 3; // Disk full or allocation exceeded.
-pub const ERR_ILLEGAL_OPERATION: u16   = 4; // Illegal TFTP operation.
+pub const ERR_NOT_DEFINED: u16 = 0; // Not defined, see error message (if any).
+pub const ERR_FILE_NOT_FOUND: u16 = 1; // File not found.
+pub const ERR_ACCESS_VIOLATION: u16 = 2; // Access violation.
+pub const ERR_DISK_FULL: u16 = 3; // Disk full or allocation exceeded.
+pub const ERR_ILLEGAL_OPERATION: u16 = 4; // Illegal TFTP operation.
 pub const ERR_UNKNOWN_TRANSFER_ID: u16 = 5; // Unknown transfer ID.
-pub const ERR_FILE_EXISTS: u16         = 6; // File already exists.
-pub const ERR_NO_USER: u16             = 7; // No such user.
-pub const ERR_INVALID_OPTIONS: u16     = 8; // Invalid options
+pub const ERR_FILE_EXISTS: u16 = 6; // File already exists.
+pub const ERR_NO_USER: u16 = 7; // No such user.
+pub const ERR_INVALID_OPTIONS: u16 = 8; // Invalid options
 
 #[derive(Debug)]
 pub enum TftpPacket<'req> {
@@ -49,17 +49,20 @@ impl<'req> TftpPacket<'req> {
     pub fn from_bytes(bytes: &'req [u8]) -> io::Result<TftpPacket<'req>> {
         let mut buf = bytes.into_buf();
         if buf.remaining() < 2 {
-            return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet: No type code."))
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Malformed packet: No type code.",
+            ));
         }
 
         let code = buf.get_u16_be();
         match code {
-            1|2 => {
+            1 | 2 => {
                 let strs = &bytes[2..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
                 if strs.len() < 2 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
-                if (strs.len() % 2) == 0 || strs[strs.len()-1].len() > 0 {
+                if (strs.len() % 2) == 0 || strs[strs.len() - 1].len() > 0 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
 
@@ -83,36 +86,42 @@ impl<'req> TftpPacket<'req> {
                         options: options,
                     })
                 }
-            },
+            }
             3 => {
                 if buf.remaining() < 2 {
-                    return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"))
+                    return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
                 let block = buf.get_u16_be();
                 let data = &bytes[4..];
-                Ok(TftpPacket::Data { block: block, data: data })
-            },
+                Ok(TftpPacket::Data {
+                    block: block,
+                    data: data,
+                })
+            }
             4 => {
                 if buf.remaining() < 2 {
-                    return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"))
+                    return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
                 Ok(TftpPacket::Ack(buf.get_u16_be()))
-            },
+            }
             5 => {
                 if buf.remaining() < 2 {
-                    return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"))
+                    return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
                 let code = buf.get_u16_be();
                 let strs = &bytes[4..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
                 if strs.len() < 1 {
-                    return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"))
+                    return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
                 let message = strs[0];
-                Ok(TftpPacket::Error { code: code, message: message })
-            },
+                Ok(TftpPacket::Error {
+                    code: code,
+                    message: message,
+                })
+            }
             6 => {
                 let strs = &bytes[2..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
-                if (strs.len() % 2) == 0 || strs[strs.len()-1].len() > 0 {
+                if (strs.len() % 2) == 0 || strs[strs.len() - 1].len() > 0 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
 
@@ -124,16 +133,20 @@ impl<'req> TftpPacket<'req> {
                 }
 
                 Ok(TftpPacket::OptionsAck(options))
-            },
-            code => {
-                Err(Error::new(ErrorKind::InvalidInput, format!("Unknown packet type: {}", code)))
-            },
+            }
+            code => Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("Unknown packet type: {}", code),
+            )),
         }
     }
 
     pub fn encode<B: BufMut>(&self, out: &mut B) {
         fn encode_options<B: BufMut>(options: &HashMap<&[u8], &[u8]>, out: &mut B) {
-            let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = options.iter().map(|(k, v)| { ((*k).to_vec(), (*v).to_vec())}).collect();
+            let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = options
+                .iter()
+                .map(|(k, v)| ((*k).to_vec(), (*v).to_vec()))
+                .collect();
             pairs.sort();
             for (key, value) in pairs {
                 out.put(key);
@@ -144,38 +157,45 @@ impl<'req> TftpPacket<'req> {
         }
 
         match *self {
-            TftpPacket::ReadRequest { filename, mode, ref options } => {
+            TftpPacket::ReadRequest {
+                filename,
+                mode,
+                ref options,
+            } => {
                 out.put_u16_be(1);
                 out.put(filename);
                 out.put_u8(0);
                 out.put(mode);
                 out.put_u8(0);
                 encode_options(options, out);
-            },
-            TftpPacket::WriteRequest { filename, mode, ref options } => {
+            }
+            TftpPacket::WriteRequest {
+                filename,
+                mode,
+                ref options,
+            } => {
                 out.put_u16_be(2);
                 out.put(filename);
                 out.put_u8(0);
                 out.put(mode);
                 out.put_u8(0);
                 encode_options(options, out);
-            },
+            }
             TftpPacket::Data { block, data } => {
                 out.put_u16_be(3);
                 out.put_u16_be(block);
                 out.put(data);
-
             }
             TftpPacket::Ack(block) => {
                 out.put_u16_be(4);
                 out.put_u16_be(block);
-            },
+            }
             TftpPacket::Error { code, message } => {
                 out.put_u16_be(5);
                 out.put_u16_be(code);
                 out.put(message);
                 out.put_u8(0);
-            },
+            }
             TftpPacket::OptionsAck(ref options) => {
                 out.put_u16_be(6);
                 for (&key, &value) in options.iter() {
@@ -184,33 +204,44 @@ impl<'req> TftpPacket<'req> {
                     out.put(value);
                     out.put_u8(0);
                 }
-            },
+            }
         }
     }
 
     #[allow(dead_code)]
     pub fn encoded_size(&self) -> usize {
         match *self {
-            TftpPacket::ReadRequest { filename, mode, ref options } => {
-                let opts_len: usize = options.iter().map(|(&k, &v)| k.len() + 1 + v.len() + 1).sum();
+            TftpPacket::ReadRequest {
+                filename,
+                mode,
+                ref options,
+            } => {
+                let opts_len: usize = options
+                    .iter()
+                    .map(|(&k, &v)| k.len() + 1 + v.len() + 1)
+                    .sum();
                 2 + filename.len() + 1 + mode.len() + 1 + opts_len
-            },
-            TftpPacket::WriteRequest { filename, mode, ref options } => {
-                let opts_len: usize = options.iter().map(|(&k, &v)| k.len() + 1 + v.len() + 1).sum();
-                2 + filename.len() + 1 + mode.len() + 1 + opts_len
-            },
-            TftpPacket::Data { data, .. } => {
-                2 + 2 + data.len()
             }
-            TftpPacket::Ack(_) => {
-                2 + 2
-            },
-            TftpPacket::Error { message, ..} => {
-                2 + 2 + message.len() + 1
-            },
+            TftpPacket::WriteRequest {
+                filename,
+                mode,
+                ref options,
+            } => {
+                let opts_len: usize = options
+                    .iter()
+                    .map(|(&k, &v)| k.len() + 1 + v.len() + 1)
+                    .sum();
+                2 + filename.len() + 1 + mode.len() + 1 + opts_len
+            }
+            TftpPacket::Data { data, .. } => 2 + 2 + data.len(),
+            TftpPacket::Ack(_) => 2 + 2,
+            TftpPacket::Error { message, .. } => 2 + 2 + message.len() + 1,
             TftpPacket::OptionsAck(ref options) => {
-                2 + options.iter().map(|(&k, &v)| k.len() + 1 + v.len() + 1).sum::<usize>()
-            },
+                2 + options
+                    .iter()
+                    .map(|(&k, &v)| k.len() + 1 + v.len() + 1)
+                    .sum::<usize>()
+            }
         }
     }
 }
@@ -219,44 +250,68 @@ impl<'a> fmt::Display for TftpPacket<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::TftpPacket::*;
         match *self {
-            ReadRequest { ref filename, ref mode, ref options } => {
+            ReadRequest {
+                ref filename,
+                ref mode,
+                ref options,
+            } => {
                 let filename = AsciiStr::from_ascii(filename).unwrap();
                 let mode = AsciiStr::from_ascii(mode).unwrap();
-                let options_as_str = options.iter().map(|(&key, &value)| {
-                    let key = AsciiStr::from_ascii(key).unwrap();
-                    let value = AsciiStr::from_ascii(value).unwrap();
-                    format!("{}={}", key, value)
-                }).collect::<Vec<_>>().join(", ");
-                write!(f, "RRQ[file={}, mode={}, {}]", filename, mode, options_as_str)
-            },
-            WriteRequest { ref filename, ref mode, ref options } => {
-                let filename = AsciiStr::from_ascii(filename).unwrap();
-                let mode = AsciiStr::from_ascii(mode).unwrap();
-                let options_as_str = options.iter().map(|(&key, &value)| {
-                    let key = AsciiStr::from_ascii(key).unwrap();
-                    let value = AsciiStr::from_ascii(value).unwrap();
-                    format!("{}={}", key, value)
-                }).collect::<Vec<_>>().join(", ");
-                write!(f, "WRQ[file={}, mode={}, {}]", filename, mode, options_as_str)
-            },
-            Data { block, data } => {
-                write!(f, "DATA[block={}, {} bytes]", block, data.len())
-            },
-            Ack(block) => {
-                write!(f, "ACK[block={}]", block)
+                let options_as_str = options
+                    .iter()
+                    .map(|(&key, &value)| {
+                        let key = AsciiStr::from_ascii(key).unwrap();
+                        let value = AsciiStr::from_ascii(value).unwrap();
+                        format!("{}={}", key, value)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "RRQ[file={}, mode={}, {}]",
+                    filename, mode, options_as_str
+                )
             }
+            WriteRequest {
+                ref filename,
+                ref mode,
+                ref options,
+            } => {
+                let filename = AsciiStr::from_ascii(filename).unwrap();
+                let mode = AsciiStr::from_ascii(mode).unwrap();
+                let options_as_str = options
+                    .iter()
+                    .map(|(&key, &value)| {
+                        let key = AsciiStr::from_ascii(key).unwrap();
+                        let value = AsciiStr::from_ascii(value).unwrap();
+                        format!("{}={}", key, value)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "WRQ[file={}, mode={}, {}]",
+                    filename, mode, options_as_str
+                )
+            }
+            Data { block, data } => write!(f, "DATA[block={}, {} bytes]", block, data.len()),
+            Ack(block) => write!(f, "ACK[block={}]", block),
             Error { code, ref message } => {
                 let message = AsciiStr::from_ascii(message).unwrap();
                 write!(f, "ERROR[code={}, msg='{}']", code, message)
-            },
+            }
             OptionsAck(ref options) => {
-                let options_as_str = options.iter().map(|(&key, &value)| {
-                    let key = AsciiStr::from_ascii(key).unwrap();
-                    let value = AsciiStr::from_ascii(value).unwrap();
-                    format!("{}={}", key, value)
-                }).collect::<Vec<_>>().join(", ");
+                let options_as_str = options
+                    .iter()
+                    .map(|(&key, &value)| {
+                        let key = AsciiStr::from_ascii(key).unwrap();
+                        let value = AsciiStr::from_ascii(value).unwrap();
+                        format!("{}={}", key, value)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 write!(f, "OACK[{}]", options_as_str)
-            },
+            }
         }
     }
 }

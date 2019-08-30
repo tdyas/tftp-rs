@@ -38,7 +38,11 @@ pub(crate) struct TftpConnState {
 }
 
 impl TftpConnState {
-    pub fn new(socket: UdpSocket, remote_addr_opt: Option<SocketAddr>, main_remote_addr_opt: Option<SocketAddr>) -> TftpConnState {
+    pub fn new(
+        socket: UdpSocket,
+        remote_addr_opt: Option<SocketAddr>,
+        main_remote_addr_opt: Option<SocketAddr>,
+    ) -> TftpConnState {
         TftpConnState {
             socket: socket,
             remote_addr: remote_addr_opt,
@@ -51,7 +55,10 @@ impl TftpConnState {
     fn remote_addr(&self) -> io::Result<SocketAddr> {
         match self.remote_addr.or(self.main_remote_addr) {
             Some(addr) => Ok(addr),
-            None => Err(io::Error::new(io::ErrorKind::AddrNotAvailable, "No address set in state")),
+            None => Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "No address set in state",
+            )),
         }
     }
 
@@ -65,7 +72,10 @@ impl TftpConnState {
         let remote_addr = self.remote_addr()?;
 
         let bytes_to_send = {
-            let packet = TftpPacket::Error { code: code, message: message };
+            let packet = TftpPacket::Error {
+                code: code,
+                message: message,
+            };
             let mut buffer = BytesMut::with_capacity(packet.encoded_size());
             packet.encode(&mut buffer);
             buffer.freeze()
@@ -76,8 +86,14 @@ impl TftpConnState {
         Ok(())
     }
 
-    pub async fn send_and_receive_next<F>(&mut self, bytes_to_send: Bytes, check_packet: F) -> io::Result<OwnedTftpPacket>
-        where F: Fn(&TftpPacket) -> PacketCheckResult {
+    pub async fn send_and_receive_next<F>(
+        &mut self,
+        bytes_to_send: Bytes,
+        check_packet: F,
+    ) -> io::Result<OwnedTftpPacket>
+    where
+        F: Fn(&TftpPacket) -> PacketCheckResult,
+    {
         let mut buffer: Vec<u8> = vec![0; 65535];
 
         if self.trace_packets {
@@ -94,8 +110,11 @@ impl TftpConnState {
             let remote_addr = match self.remote_addr.or(self.main_remote_addr) {
                 Some(addr) => addr,
                 None => {
-                    return Err(io::Error::new(io::ErrorKind::AddrNotAvailable, "No address set in state"));
-                },
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrNotAvailable,
+                        "No address set in state",
+                    ));
+                }
             };
 
             // Send the packet to the remote.
@@ -130,7 +149,7 @@ impl TftpConnState {
                                     // TODO: Send error packet.
                                     continue 'receive_loop;
                                 }
-                            },
+                            }
                             None => {
                                 // Record the peer's address as the expected address if and only if there is a separate
                                 // "main" remote address in use and this packet's address differs from that main address.
@@ -151,16 +170,21 @@ impl TftpConnState {
                                 }
                                 match packet {
                                     TftpPacket::Error { code, message } => {
-                                        let message_as_str = AsciiStr::from_ascii(&message).map(|s| s.as_str()).unwrap_or("Malformed message");
-                                        return Err(io::Error::new(io::ErrorKind::Other, format!("TFTP Error: {} ({})", code, message_as_str)));
-                                    },
+                                        let message_as_str = AsciiStr::from_ascii(&message)
+                                            .map(|s| s.as_str())
+                                            .unwrap_or("Malformed message");
+                                        return Err(io::Error::new(
+                                            io::ErrorKind::Other,
+                                            format!("TFTP Error: {} ({})", code, message_as_str),
+                                        ));
+                                    }
                                     packet => packet,
                                 }
-                            },
+                            }
                             Err(_) => {
                                 // TODO: Send error to source for malformed packets. Ignore for now.
-                                continue 'receive_loop
-                            },
+                                continue 'receive_loop;
+                            }
                         };
 
                         // Ask the supplied closure whether this packet is expected.
@@ -173,18 +197,22 @@ impl TftpConnState {
                                 };
 
                                 return Ok(owned_packet);
-                            },
+                            }
                             PacketCheckResult::Ignore => continue 'receive_loop,
                             PacketCheckResult::Reject => {
-                                let _ = self.send_error(ERR_ILLEGAL_OPERATION, b"Illegal operation").await;
-                                return Err(io::Error::new(io::ErrorKind::InvalidInput, "Unexpected packet"));
+                                let _ = self
+                                    .send_error(ERR_ILLEGAL_OPERATION, b"Illegal operation")
+                                    .await;
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    "Unexpected packet",
+                                ));
                             }
                         };
-
-                    },
+                    }
                     Ok(Err(err)) => {
                         return Err(err);
-                    },
+                    }
                     Err(_) => {
                         // We timed out without receiving a response. Resend the next packet.
                         continue 'send_loop;
