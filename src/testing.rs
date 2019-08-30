@@ -6,6 +6,8 @@ use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
 
 use crate::proto::TftpPacket;
+use tokio::timer::Timeout;
+use std::time::Duration;
 
 pub enum Op {
     Send(Bytes),
@@ -69,7 +71,7 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
         match step {
             Op::Send(bytes) => {
                 let remote_addr = context.remote_addr_opt.unwrap_or(context.main_remote_addr);
-                let result = context.socket.send_to(&bytes[0..bytes.len()], &remote_addr).await;
+                let result = context.socket.send_to(&bytes, &remote_addr).await;
                 match result {
                     Ok(_) => {},
                     Err(err) => {
@@ -79,14 +81,16 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
             }
             Op::Receive(expected_bytes) => {
                 let mut buffer: Vec<u8> = vec![0; 65535];
-                match context.socket.recv_from(&mut buffer).await {
-                    Ok((len, remote_addr)) => {
+                let recv_fut = context.socket.recv_from(&mut buffer);
+                let timeout_fut = Timeout::new(recv_fut, Duration::new(5, 0));
+                match timeout_fut.await {
+                    Ok(Ok((len, remote_addr))) => {
                         if context.remote_addr_opt.is_none() {
                             context.remote_addr_opt = Some(remote_addr);
                         }
                         match TftpPacket::from_bytes(&buffer[0..len]) {
                             Ok(packet) => {
-                                println!("Received {}", &packet);
+                                println!("TEST: Received {}", &packet);
                             }
                             Err(err) => return Err(TestError::new(err.description())),
                         };
@@ -95,9 +99,10 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
                             return Err(TestError::new("Packets differ"));
                         }
                     },
-                    Err(err) => {
+                    Ok(Err(err)) => {
                         return Err(TestError::new(err.description()));
-                    }
+                    },
+                    Err(_) => return Err(TestError::new("timed out while waiting for packet")),
                 }
             }
         }
