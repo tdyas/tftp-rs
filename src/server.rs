@@ -10,10 +10,9 @@ use tokio::net::UdpSocket;
 use tokio::fs::File;
 use tokio::prelude::*;
 
-use super::conn::TftpConnState;
-use super::proto::{DEFAULT_BLOCK_SIZE, MIN_BLOCK_SIZE, MAX_BLOCK_SIZE, ERR_FILE_NOT_FOUND,
+use crate::conn::{OwnedTftpPacket, TftpConnState, PacketCheckResult};
+use crate::proto::{DEFAULT_BLOCK_SIZE, MIN_BLOCK_SIZE, MAX_BLOCK_SIZE, ERR_FILE_NOT_FOUND,
                    ERR_INVALID_OPTIONS, TftpPacket};
-use crate::conn::Datagram;
 
 pub struct TftpServer {
     socket: UdpSocket,
@@ -149,23 +148,12 @@ impl TftpServer {
                 packet.encode(&mut buffer);
                 buffer.freeze()
             };
-            let next_datagram = conn_state.send_and_receive_next(bytes.clone()).await?;
-            let next_packet = TftpPacket::from_bytes(&next_datagram.data);
-            println!("Received packet: {:?}", &next_packet);
-            match next_packet {
-                Ok(TftpPacket::Ack(0)) => {
-                    // Client acknowledges options with ACK to block "0".
-                },
-                Ok(TftpPacket::Error { code, message }) => {
-                    println!("Client sent error: code={}, message={}", code, message.into_ascii_string().unwrap());
-                    return Ok(());
-                },
-                Ok(ref packet) => {
-                    println!("Unexpected packet: {}", packet);
-                    option_err = Some((1, b"Protocol violation"));
-                },
-                Err(err) => return Err(err),
-            }
+            let _ = conn_state.send_and_receive_next(bytes.clone(), |packet| {
+                match packet {
+                    TftpPacket::Ack(0) => PacketCheckResult::Accept,
+                    _ => PacketCheckResult::Reject,
+                }
+            }).await?;
         }
 
         if let Some((code, message)) = option_err {
@@ -193,27 +181,21 @@ impl TftpServer {
 
             current_file_bytes_index += n;
 
-            loop {
-                let next_datagram = conn_state.send_and_receive_next(data_packet_bytes.clone()).await?;
-                let next_packet = TftpPacket::from_bytes(&next_datagram.data);
-                match next_packet {
-                    Ok(TftpPacket::Ack(block_num)) => {
-                        if block_num == current_block_num {
-                            current_block_num += 1;
-                            break;
+            let _ = conn_state.send_and_receive_next(data_packet_bytes.clone(), |packet| {
+                match packet {
+                    TftpPacket::Ack(block_num) => {
+                        if *block_num < current_block_num {
+                            PacketCheckResult::Ignore
+                        } else if *block_num == current_block_num {
+                            PacketCheckResult::Accept
+                        } else {
+                            PacketCheckResult::Reject
                         }
                     },
-                    Ok(TftpPacket::Error { code, message }) => {
-                        println!("Client has error: code={}, message={}", code, message.into_ascii_string().unwrap());
-                        return Ok(());
-                    },
-                    Ok(ref packet) => {
-                        println!("Unexpected packet: {}", packet);
-                        return Ok(());
-                    },
-                    Err(err) => return Err(err),
+                    _ => PacketCheckResult::Reject,
                 }
-            }
+            }).await?;
+            current_block_num += 1;
 
             if n < block_size {
                 break;
@@ -224,24 +206,14 @@ impl TftpServer {
         Ok(())
     }
 
-    async fn do_request(raw_request: Datagram, reader_factory: &Box<dyn ReaderFactory + Send + Sync>) {
+    async fn do_request(request: OwnedTftpPacket, reader_factory: &Box<dyn ReaderFactory + Send + Sync>) {
         // Bind a socket for this connection.
         let reply_bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let reply_socket = UdpSocket::bind(&reply_bind_addr).await.unwrap();
 
-        let mut conn_state = TftpConnState::new(reply_socket, raw_request.addr);
-        let request = match TftpPacket::from_bytes(&raw_request.data[..]) {
-            Ok(req) => {
-                println!(">> {}: {}", &raw_request.addr, &req);
-                req
-            }
-            Err(err) => {
-                println!("-- {}: {}", &raw_request.addr, &err);
-                return;
-            }
-        };
+        let mut conn_state = TftpConnState::new(reply_socket, Some(request.addr), None);
 
-        match request {
+        match request.packet() {
             TftpPacket::ReadRequest { filename, mode, ref options } => {
                 let filename = filename.into_ascii_string().unwrap();
                 let mode = mode.into_ascii_string().unwrap();
@@ -277,8 +249,12 @@ impl TftpServer {
         let mut buffer: Vec<u8> = vec![0; 65535];
         loop {
             let (packet_length, remote_addr) = self.socket.recv_from(&mut buffer).await?;
-            let datagram = Datagram { data: Bytes::from(&buffer[0..packet_length]), addr: remote_addr};
-            TftpServer::do_request(datagram, &self.reader_factory).await;
+            let packet_bytes = Bytes::from(&buffer[0..packet_length]);
+            let owned_packet = OwnedTftpPacket {
+                addr: remote_addr,
+                bytes: packet_bytes,
+            };
+            TftpServer::do_request(owned_packet, &self.reader_factory).await;
         }
     }
 
