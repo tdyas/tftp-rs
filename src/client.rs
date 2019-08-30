@@ -7,6 +7,7 @@ use crate::proto::{TftpPacket, ERR_INVALID_OPTIONS, MIN_BLOCK_SIZE, MAX_BLOCK_SI
 use std::collections::HashMap;
 use ascii::AsAsciiStr;
 use std::str::FromStr;
+use crate::config::TftpConfig;
 
 fn parse_number<N: FromStr>(m: &HashMap<&[u8], &[u8]>, key: &[u8]) -> ::std::option::Option<N> {
     m.get(&key).and_then(move |x| {
@@ -22,7 +23,7 @@ fn parse_number<N: FromStr>(m: &HashMap<&[u8], &[u8]>, key: &[u8]) -> ::std::opt
     })
 }
 
-pub async fn tftp_get(address: &SocketAddr, filename: &[u8], mode: &[u8]) -> io::Result<Bytes> {
+pub async fn tftp_get(address: &SocketAddr, filename: &[u8], mode: &[u8], config: &TftpConfig) -> io::Result<Bytes> {
     println!("tftp_get: address={:?}", address);
 
     // Bind a random but specific local socket for this request.
@@ -32,12 +33,14 @@ pub async fn tftp_get(address: &SocketAddr, filename: &[u8], mode: &[u8]) -> io:
     let mut conn_state = TftpConnState::new(socket, None, Some(address.clone()));
 
     let mut enable_transfer_size_option;
-    let mut block_size: u16 = 16384;
+    let mut block_size: u16 = config.max_block_size;
 
     let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
-    options.insert(b"tsize", b"0");
     let blksize_value = format!("{}", &block_size);
-    options.insert(b"blksize", blksize_value.as_bytes());
+    if !config.disable_options {
+        options.insert(b"tsize", b"0");
+        options.insert(b"blksize", blksize_value.as_bytes());
+    }
 
     let read_request_bytes = {
         let packet = TftpPacket::ReadRequest {
@@ -54,8 +57,6 @@ pub async fn tftp_get(address: &SocketAddr, filename: &[u8], mode: &[u8]) -> io:
     let mut actual_transfer_size: usize = 0;
     let mut expected_transfer_size: usize = 0;
     let mut file_bytes = BytesMut::new();
-
-    let mut buffer: Vec<u8> = vec![0; 65535];
 
     let mut option_err: Option<(u16, &'static [u8])> = None;
 
@@ -114,9 +115,12 @@ pub async fn tftp_get(address: &SocketAddr, filename: &[u8], mode: &[u8]) -> io:
 
     'data_loop: loop {
         // Send the acknowledgement for the data packet or OACK.
-        let ack = TftpPacket::Ack(current_block_num);
-        ack.encode(&mut buffer);
-        let ack_bytes_to_send = Bytes::from(&buffer[0..ack.encoded_size()]);
+        let ack_bytes_to_send = {
+            let packet = TftpPacket::Ack(current_block_num);
+            let mut buffer = BytesMut::with_capacity(packet.encoded_size());
+            packet.encode(&mut buffer);
+            buffer.freeze()
+        };
         let response = conn_state.send_and_receive_next(ack_bytes_to_send, |packet| {
             match packet {
                 TftpPacket::Data { block, ..} => {
@@ -142,9 +146,12 @@ pub async fn tftp_get(address: &SocketAddr, filename: &[u8], mode: &[u8]) -> io:
                 file_bytes.extend_from_slice(data);
                 actual_transfer_size += data.len();
                 if (data.len() as u16) < block_size {
-                    let ack = TftpPacket::Ack(current_block_num);
-                    ack.encode(&mut buffer);
-                    let ack_bytes_to_send = Bytes::from(&buffer[0..ack.encoded_size()]);
+                    let ack_bytes_to_send = {
+                        let packet = TftpPacket::Ack(current_block_num);
+                        let mut buffer = BytesMut::with_capacity(packet.encoded_size());
+                        packet.encode(&mut buffer);
+                        buffer.freeze()
+                    };
                     conn_state.send(&ack_bytes_to_send).await?;
                     break 'data_loop;
                 }
@@ -163,18 +170,20 @@ pub async fn tftp_get(address: &SocketAddr, filename: &[u8], mode: &[u8]) -> io:
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::error::Error;
     use std::net::SocketAddr;
 
+    use bytes::{BufMut, BytesMut};
     use futures::try_join;
     use tokio::prelude::*;
     use tokio::net::UdpSocket;
 
     use crate::client::tftp_get;
     use crate::testing::*;
-    use std::collections::HashMap;
-    use std::error::Error;
+    use crate::config::TftpConfig;
 
-    async fn run_client_test<F>(test: impl FnOnce(SocketAddr) -> F, steps: Vec<Op>) -> Result<(), TestError>
+    async fn run_client_test<F>(config: &TftpConfig, test: impl FnOnce(SocketAddr, TftpConfig) -> F, steps: Vec<Op>)
         where F: Future<Output=Result<(), TestError>> {
 
         let addr: SocketAddr = "127.0.0.1:0".parse().expect("bind address");
@@ -184,38 +193,52 @@ mod tests {
         let mut context = TestContext::new(socket, &server_addr);
         let driver_fut = test_driver(&mut context, steps);
 
-        let test_fut = test(server_addr);
+        let test_fut = test(server_addr, config.clone());
 
-        try_join!(test_fut, driver_fut).map(|_| ())
+        let result = try_join!(test_fut, driver_fut).map(|_| ());
+        if result.is_err() {
+            panic!("Test failed: {}", result.unwrap_err());
+        }
     }
 
     #[tokio::test]
     async fn test_get() {
-//        let data = {
-//            let mut b = BytesMut::with_capacity(2048);
-//            for v in 0..b.capacity() {
-//                b.put((v & 0xFF) as u8);
-//            }
-//            b.freeze()
-//        };
+        let data = {
+            let mut b = BytesMut::with_capacity(2048);
+            for v in 0..b.capacity() {
+                b.put((v & 0xFF) as u8);
+            }
+            b.freeze()
+        };
 
         use Op::*;
         use crate::proto::TftpPacket::*;
 
-        let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
-        options.insert(b"tsize", b"0");
-        options.insert(b"blksize", b"16384");
-        let result = run_client_test(async move |server_addr| {
-            let result = tftp_get(&server_addr, b"missing", b"octet").await;
+        let mut config = TftpConfig::default();
+        config.disable_options = true;
+
+        run_client_test(&config, async move |server_addr, config| {
+            let result = tftp_get(&server_addr, b"missing", b"octet", &config).await;
             let error = result.expect_err("error expected");
             assert!(error.description().contains("File not found"));
             Ok(())
         }, vec![
-            Receive(mk(ReadRequest { filename: b"missing", mode: b"octet", options: options })),
+            Receive(mk(ReadRequest { filename: b"missing", mode: b"octet", options: HashMap::new() })),
             Send(mk(Error { code: 1, message: b"File not found" })),
         ]).await;
-        if result.is_err() {
-            panic!("Test failed: {}", result.unwrap_err());
-        }
+
+        let expected_bytes = data.slice(0, 768);
+        run_client_test(&config, async move |server_addr, config| {
+            let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+            let actual_bytes = result.expect("bytes expected");
+            assert_eq!(&expected_bytes, &actual_bytes);
+            Ok(())
+        }, vec![
+            Receive(mk(ReadRequest { filename: b"xyzzy", mode: b"octet", options: HashMap::new() })),
+            Send(mk(Data { block: 1, data: &data[0..512]})),
+            Receive(mk(Ack(1))),
+            Send(mk(Data { block: 2, data: &data[512..768]})),
+            Receive(mk(Ack(2))),
+        ]).await;
     }
 }

@@ -48,24 +48,31 @@ impl TftpConnState {
         }
     }
 
-    pub async fn send(&mut self, bytes_to_send: &Bytes) -> io::Result<()> {
-        if let Some(remote_addr) = self.remote_addr {
-            self.socket.send_to(bytes_to_send, &remote_addr).await?;
+    fn remote_addr(&self) -> io::Result<SocketAddr> {
+        match self.remote_addr.or(self.main_remote_addr) {
+            Some(addr) => Ok(addr),
+            None => Err(io::Error::new(io::ErrorKind::AddrNotAvailable, "No address set in state")),
         }
+    }
+
+    pub async fn send(&mut self, bytes_to_send: &Bytes) -> io::Result<()> {
+        let remote_addr = self.remote_addr()?;
+        self.socket.send_to(bytes_to_send, &remote_addr).await?;
         Ok(())
     }
 
     pub async fn send_error(&mut self, code: u16, message: &'static [u8]) -> io::Result<()> {
-        if let Some(remote_addr) = self.remote_addr {
-            let bytes_to_send = {
-                let error_packet = TftpPacket::Error { code: code, message: message };
-                let mut buffer = BytesMut::with_capacity(65535);
-                error_packet.encode(&mut buffer);
-                buffer.freeze()
-            };
+        let remote_addr = self.remote_addr()?;
 
-            self.socket.send_to(&bytes_to_send, &remote_addr).await?;
-        }
+        let bytes_to_send = {
+            let packet = TftpPacket::Error { code: code, message: message };
+            let mut buffer = BytesMut::with_capacity(packet.encoded_size());
+            packet.encode(&mut buffer);
+            buffer.freeze()
+        };
+
+        self.socket.send_to(&bytes_to_send, &remote_addr).await?;
+
         Ok(())
     }
 
