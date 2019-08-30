@@ -240,5 +240,21 @@ mod tests {
             Send(mk(Data { block: 2, data: &data[512..768]})),
             Receive(mk(Ack(2))),
         ]).await;
+
+        let expected_bytes = data.slice(0, 1024);
+        run_client_test(&config, async move |server_addr, config| {
+            let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+            let actual_bytes = result.expect("bytes expected");
+            assert_eq!(&expected_bytes, &actual_bytes);
+            Ok(())
+        }, vec![
+            Receive(mk(ReadRequest { filename: b"xyzzy", mode: b"octet", options: HashMap::new() })),
+            Send(mk(Data { block: 1, data: &data[0..512]})),
+            Receive(mk(Ack(1))),
+            Send(mk(Data { block: 2, data: &data[512..1024]})),
+            Receive(mk(Ack(2))),
+            Send(mk(Data { block: 3, data: &[]})),
+            Receive(mk(Ack(3))),
+        ]).await;
     }
 }
