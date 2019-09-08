@@ -201,6 +201,7 @@ mod tests {
     use crate::testing::*;
 
     async fn run_client_test<F>(
+        test_name: &str,
         config: &TftpConfig,
         test: impl FnOnce(SocketAddr, TftpConfig) -> F,
         steps: Vec<Op>,
@@ -216,9 +217,11 @@ mod tests {
 
         let test_fut = test(server_addr, config.clone());
 
+        println!("TEST '{}'", test_name);
         let result = try_join!(test_fut, driver_fut).map(|_| ());
-        if result.is_err() {
-            panic!("Test failed: {}", result.unwrap_err());
+        match result {
+            Ok(_) => println!("TEST '{}': PASSED", test_name),
+            Err(err) => panic!("Test '{}' failed: {}", test_name, err),
         }
     }
 
@@ -240,6 +243,7 @@ mod tests {
         config.enable_tsize_option = false;
 
         run_client_test(
+            "file not found",
             &config,
             async move |server_addr, config| {
                 let result = tftp_get(&server_addr, b"missing", b"octet", &config).await;
@@ -263,6 +267,7 @@ mod tests {
 
         let expected_bytes = data.slice(0, 768);
         run_client_test(
+            "simple read",
             &config,
             async move |server_addr, config| {
                 let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
@@ -292,6 +297,7 @@ mod tests {
 
         let expected_bytes = data.slice(0, 1024);
         run_client_test(
+            "read with block-aligned file size",
             &config,
             async move |server_addr, config| {
                 let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
@@ -333,6 +339,7 @@ mod tests {
         config.enable_tsize_option = true;
         config.enable_blksize_option = false;
         run_client_test(
+            "read with tsize option",
             &config,
             async move |server_addr, config| {
                 let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
@@ -372,6 +379,7 @@ mod tests {
         config.enable_blksize_option = true;
         config.max_block_size = 768;
         run_client_test(
+            "read with blksize option",
             &config,
             async move |server_addr, config| {
                 let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
