@@ -41,8 +41,10 @@ pub async fn tftp_get(
 
     let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
     let blksize_value = format!("{}", &block_size);
-    if !config.disable_options {
+    if config.enable_tsize_option {
         options.insert(b"tsize", b"0");
+    }
+    if config.enable_blksize_option {
         options.insert(b"blksize", blksize_value.as_bytes());
     }
 
@@ -234,7 +236,8 @@ mod tests {
         use Op::*;
 
         let mut config = TftpConfig::default();
-        config.disable_options = true;
+        config.enable_blksize_option = false;
+        config.enable_tsize_option = false;
 
         run_client_test(
             &config,

@@ -4,7 +4,8 @@ pub struct TftpConfig {
     pub retransmission_timeout: u16,
     pub max_retries: u16,
     pub trace_packets: bool,
-    pub disable_options: bool,
+    pub enable_tsize_option: bool,
+    pub enable_blksize_option: bool,
 }
 
 impl Default for TftpConfig {
@@ -14,7 +15,8 @@ impl Default for TftpConfig {
             retransmission_timeout: 2,
             max_retries: 5,
             trace_packets: true,
-            disable_options: false,
+            enable_tsize_option: true,
+            enable_blksize_option: true,
         }
     }
 }
