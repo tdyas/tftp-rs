@@ -361,5 +361,44 @@ mod tests {
             ],
         )
         .await;
+
+        // read with blksize option - non-block-size number of bytes
+        let expected_bytes = data.slice(0, 1024);
+        let mut send_options: HashMap<&[u8], &[u8]> = HashMap::new();
+        send_options.insert(b"blksize", b"768");
+        let mut recv_options: HashMap<&[u8], &[u8]> = HashMap::new();
+        recv_options.insert(b"blksize", b"768");
+        config.enable_tsize_option = false;
+        config.enable_blksize_option = true;
+        config.max_block_size = 768;
+        run_client_test(
+            &config,
+            async move |server_addr, config| {
+                let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+                let actual_bytes = result.expect("bytes expected");
+                assert_eq!(&expected_bytes, &actual_bytes);
+                Ok(())
+            },
+            vec![
+                Receive(mk(ReadRequest {
+                    filename: b"xyzzy",
+                    mode: b"octet",
+                    options: send_options,
+                })),
+                Send(mk(OptionsAck(recv_options))),
+                Receive(mk(Ack(0))),
+                Send(mk(Data {
+                    block: 1,
+                    data: &data[0..768],
+                })),
+                Receive(mk(Ack(1))),
+                Send(mk(Data {
+                    block: 2,
+                    data: &data[768..1024],
+                })),
+                Receive(mk(Ack(2))),
+            ],
+        )
+        .await;
     }
 }
