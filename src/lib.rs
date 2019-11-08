@@ -1,5 +1,3 @@
-#![feature(async_closure)]
-
 mod client;
 mod config;
 mod conn;

@@ -245,11 +245,13 @@ mod tests {
         run_client_test(
             "file not found",
             &config,
-            async move |server_addr, config| {
-                let result = tftp_get(&server_addr, b"missing", b"octet", &config).await;
-                let error = result.expect_err("error expected");
-                assert!(error.description().contains("File not found"));
-                Ok(())
+            |server_addr, config| {
+                async move {
+                    let result = tftp_get(&server_addr, b"missing", b"octet", &config).await;
+                    let error = result.expect_err("error expected");
+                    assert!(error.description().contains("File not found"));
+                    Ok(())
+                }
             },
             vec![
                 Receive(mk(ReadRequest {
@@ -269,11 +271,13 @@ mod tests {
         run_client_test(
             "simple read",
             &config,
-            async move |server_addr, config| {
-                let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
-                let actual_bytes = result.expect("bytes expected");
-                assert_eq!(&expected_bytes, &actual_bytes);
-                Ok(())
+            |server_addr, config| {
+                async move {
+                    let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+                    let actual_bytes = result.expect("bytes expected");
+                    assert_eq!(&expected_bytes, &actual_bytes);
+                    Ok(())
+                }
             },
             vec![
                 Receive(mk(ReadRequest {
@@ -299,11 +303,13 @@ mod tests {
         run_client_test(
             "read with block-aligned file size",
             &config,
-            async move |server_addr, config| {
-                let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
-                let actual_bytes = result.expect("bytes expected");
-                assert_eq!(&expected_bytes, &actual_bytes);
-                Ok(())
+            |server_addr, config| {
+                async move {
+                    let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+                    let actual_bytes = result.expect("bytes expected");
+                    assert_eq!(&expected_bytes, &actual_bytes);
+                    Ok(())
+                }
             },
             vec![
                 Receive(mk(ReadRequest {
@@ -341,11 +347,13 @@ mod tests {
         run_client_test(
             "read with tsize option",
             &config,
-            async move |server_addr, config| {
-                let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
-                let actual_bytes = result.expect("bytes expected");
-                assert_eq!(&expected_bytes, &actual_bytes);
-                Ok(())
+            |server_addr, config| {
+                async move {
+                    let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+                    let actual_bytes = result.expect("bytes expected");
+                    assert_eq!(&expected_bytes, &actual_bytes);
+                    Ok(())
+                }
             },
             vec![
                 Receive(mk(ReadRequest {
@@ -381,11 +389,13 @@ mod tests {
         run_client_test(
             "read with blksize option",
             &config,
-            async move |server_addr, config| {
-                let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
-                let actual_bytes = result.expect("bytes expected");
-                assert_eq!(&expected_bytes, &actual_bytes);
-                Ok(())
+            |server_addr, config| {
+                async move {
+                    let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+                    let actual_bytes = result.expect("bytes expected");
+                    assert_eq!(&expected_bytes, &actual_bytes);
+                    Ok(())
+                }
             },
             vec![
                 Receive(mk(ReadRequest {
