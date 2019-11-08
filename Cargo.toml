@@ -8,6 +8,6 @@ authors = ["Tom Dyas <tom@shoalsoftware.com>"]
 ascii = "0.9.2"
 async-trait = "0.1.9"
 bytes = "0.4.12"
-futures-preview = { version = "=0.3.0-alpha.19", features = ["async-await"] }
+futures = "0.3"
 pin-utils = "0.1.0-alpha.4"
 tokio = "=0.2.0-alpha.6"
