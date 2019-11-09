@@ -128,11 +128,7 @@ impl TftpConnState {
             'receive_loop: loop {
                 let recv_fut = self.socket.recv_from(&mut buffer);
                 let now = Instant::now();
-                let timeout_duration = if now.lt(&deadline) {
-                    deadline.duration_since(now)
-                } else {
-                    Duration::new(0, 0)
-                };
+                let timeout_duration = deadline.saturating_duration_since(now);
                 let timeout_fut = Timeout::new(recv_fut, timeout_duration);
 
                 match timeout_fut.await {
