@@ -265,7 +265,7 @@ mod tests {
                 })),
             ],
         )
-        .await;
+            .await;
 
         let expected_bytes = data.slice(0, 768);
         run_client_test(
@@ -297,7 +297,7 @@ mod tests {
                 Receive(mk(Ack(2))),
             ],
         )
-        .await;
+            .await;
 
         let expected_bytes = data.slice(0, 1024);
         run_client_test(
@@ -334,7 +334,7 @@ mod tests {
                 Receive(mk(Ack(3))),
             ],
         )
-        .await;
+            .await;
 
         // read with tsize option
         let expected_bytes = data.slice(0, 768);
@@ -375,7 +375,7 @@ mod tests {
                 Receive(mk(Ack(2))),
             ],
         )
-        .await;
+            .await;
 
         // read with blksize option - non-block-size number of bytes
         let expected_bytes = data.slice(0, 1024);
@@ -417,6 +417,6 @@ mod tests {
                 Receive(mk(Ack(2))),
             ],
         )
-        .await;
+            .await;
     }
 }
