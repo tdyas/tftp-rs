@@ -22,7 +22,7 @@ fn parse_number<N: FromStr>(m: &HashMap<&[u8], &[u8]>, key: &[u8]) -> ::std::opt
     })
 }
 
-pub async fn tftp_get(
+pub async fn tftp_read(
     address: &SocketAddr,
     filename: &[u8],
     mode: &[u8],
@@ -196,7 +196,7 @@ mod tests {
     use tokio::net::UdpSocket;
     use tokio::prelude::*;
 
-    use crate::client::tftp_get;
+    use crate::client::tftp_read;
     use crate::config::TftpConfig;
     use crate::testing::*;
 
@@ -247,7 +247,7 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_get(&server_addr, b"missing", b"octet", &config).await;
+                    let result = tftp_read(&server_addr, b"missing", b"octet", &config).await;
                     let error = result.expect_err("error expected");
                     assert!(error.description().contains("File not found"));
                     Ok(())
@@ -273,7 +273,7 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+                    let result = tftp_read(&server_addr, b"xyzzy", b"octet", &config).await;
                     let actual_bytes = result.expect("bytes expected");
                     assert_eq!(&expected_bytes, &actual_bytes);
                     Ok(())
@@ -305,7 +305,7 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+                    let result = tftp_read(&server_addr, b"xyzzy", b"octet", &config).await;
                     let actual_bytes = result.expect("bytes expected");
                     assert_eq!(&expected_bytes, &actual_bytes);
                     Ok(())
@@ -349,7 +349,7 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+                    let result = tftp_read(&server_addr, b"xyzzy", b"octet", &config).await;
                     let actual_bytes = result.expect("bytes expected");
                     assert_eq!(&expected_bytes, &actual_bytes);
                     Ok(())
@@ -391,7 +391,7 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_get(&server_addr, b"xyzzy", b"octet", &config).await;
+                    let result = tftp_read(&server_addr, b"xyzzy", b"octet", &config).await;
                     let actual_bytes = result.expect("bytes expected");
                     assert_eq!(&expected_bytes, &actual_bytes);
                     Ok(())

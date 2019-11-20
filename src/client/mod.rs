@@ -1,3 +1,3 @@
 mod read;
 
-pub use read::tftp_get;
+pub use read::tftp_read;
