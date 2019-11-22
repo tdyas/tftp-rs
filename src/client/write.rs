@@ -62,7 +62,6 @@ pub async fn tftp_write(
         TftpPacket::Ack(block) => {
             block_size = DEFAULT_BLOCK_SIZE;
             if block != 0 {
-                println!("TFTP server sent unexpected block number.");
                 let _ = conn_state
                     .send_error(ERR_ILLEGAL_OPERATION, b"Illegal operation.")
                     .await?;

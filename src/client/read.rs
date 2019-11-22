@@ -19,8 +19,6 @@ pub async fn tftp_read(
     mode: &[u8],
     config: &TftpConfig,
 ) -> io::Result<Bytes> {
-    println!("tftp_get: address={:?}", address);
-
     // Bind a random but specific local socket for this request.
     let socket_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let socket = UdpSocket::bind(&socket_addr).await.unwrap();
@@ -69,7 +67,6 @@ pub async fn tftp_read(
             block_size = DEFAULT_BLOCK_SIZE;
             enable_transfer_size_option = false;
             if block != current_block_num {
-                println!("TFTP server sent unexpected block number.");
                 let _ = conn_state
                     .send_error(ERR_ILLEGAL_OPERATION, b"Illegal operation.")
                     .await?;
@@ -138,7 +135,6 @@ pub async fn tftp_read(
         match response.packet() {
             TftpPacket::Data { block, data } => {
                 if block != current_block_num + 1 {
-                    println!("TFTP server sent unexpected block number.");
                     let _ = conn_state
                         .send_error(ERR_ILLEGAL_OPERATION, b"Illegal operation.")
                         .await?;
@@ -163,10 +159,6 @@ pub async fn tftp_read(
     }
 
     if enable_transfer_size_option && actual_transfer_size != expected_transfer_size {
-        println!(
-            "transfer size mismatch: expected={}, actual={}",
-            expected_transfer_size, actual_transfer_size
-        );
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "transfer size mismatch",
