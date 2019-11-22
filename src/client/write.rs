@@ -1,28 +1,17 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::str::FromStr;
 
-use ascii::AsAsciiStr;
 use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
 
+use super::util::parse_number;
 use crate::config::TftpConfig;
 use crate::conn::{PacketCheckResult, TftpConnState};
 use crate::proto::{
     TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, MAX_BLOCK_SIZE,
     MIN_BLOCK_SIZE,
 };
-
-fn parse_number<N: FromStr>(m: &HashMap<&[u8], &[u8]>, key: &[u8]) -> ::std::option::Option<N> {
-    m.get(&key).and_then(move |x| match (*x).as_ascii_str() {
-        Ok(y) => match (*y).as_str().parse::<N>() {
-            Ok(v) => Some(v),
-            Err(_) => None,
-        },
-        Err(_) => None,
-    })
-}
 
 pub async fn tftp_write(
     address: &SocketAddr,
