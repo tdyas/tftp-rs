@@ -1,13 +1,17 @@
 use std::error::Error;
 use std::fmt;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use tokio::net::UdpSocket;
+use futures::try_join;
 
-use crate::proto::TftpPacket;
-use std::time::Duration;
+use tokio::net::UdpSocket;
+use tokio::prelude::*;
 use tokio::timer::Timeout;
+
+use crate::config::TftpConfig;
+use crate::proto::TftpPacket;
 
 pub enum Op {
     Send(Bytes),
@@ -109,4 +113,29 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
     }
 
     Ok(())
+}
+
+pub async fn run_client_test<F>(
+    test_name: &str,
+    config: &TftpConfig,
+    test: impl FnOnce(SocketAddr, TftpConfig) -> F,
+    steps: Vec<Op>,
+) where
+    F: Future<Output = Result<(), TestError>>,
+{
+    let addr: SocketAddr = "127.0.0.1:0".parse().expect("bind address");
+    let socket = UdpSocket::bind(&addr).await.expect("bind socket");
+    let server_addr = socket.local_addr().expect("server address");
+
+    let mut context = TestContext::new(socket, &server_addr);
+    let driver_fut = test_driver(&mut context, steps);
+
+    let test_fut = test(server_addr, config.clone());
+
+    println!("TEST '{}'", test_name);
+    let result = try_join!(test_fut, driver_fut).map(|_| ());
+    match result {
+        Ok(_) => println!("TEST '{}': PASSED", test_name),
+        Err(err) => panic!("Test '{}' failed: {}", test_name, err),
+    }
 }
