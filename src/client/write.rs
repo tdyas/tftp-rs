@@ -335,7 +335,8 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_write(&server_addr, b"xyzzy", b"octet", &config, expected_bytes).await;
+                    let result =
+                        tftp_write(&server_addr, b"xyzzy", b"octet", &config, expected_bytes).await;
                     assert!(result.is_ok());
                     Ok(())
                 }
