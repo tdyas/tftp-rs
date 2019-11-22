@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use ascii::{AsciiString, IntoAsciiString};
@@ -57,18 +57,19 @@ impl ReaderFactory for NullReaderFactory {
 }
 
 pub struct Builder {
-    addr: Option<SocketAddr>,
+    addr: SocketAddr,
     reader_factory: Option<Box<dyn ReaderFactory + Send + Sync>>,
 }
 
 impl Builder {
     pub fn addr(mut self, addr: SocketAddr) -> Builder {
-        self.addr = Some(addr);
+        self.addr = addr;
         self
     }
 
-    pub fn port(self, port: u16) -> Builder {
-        self.addr(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port).into())
+    pub fn port(mut self, port: u16) -> Builder {
+        self.addr.set_port(port);
+        self
     }
 
     pub fn reader_factory(
@@ -85,21 +86,17 @@ impl Builder {
     }
 
     pub async fn build(self) -> io::Result<TftpServer> {
-        let addr = self.addr.ok_or(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "no address or port specified",
-        ))?;
         let reader_factory = self
             .reader_factory
             .unwrap_or(Box::new(NullReaderFactory) as Box<dyn ReaderFactory + Send + Sync>);
-        TftpServer::bind(&addr, reader_factory).await
+        TftpServer::bind(&self.addr, reader_factory).await
     }
 }
 
 impl TftpServer {
     pub fn builder() -> Builder {
         Builder {
-            addr: None,
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
             reader_factory: None,
         }
     }
