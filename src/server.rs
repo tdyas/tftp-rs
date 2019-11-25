@@ -14,7 +14,10 @@ use tokio::net::UdpSocket;
 use tokio::prelude::*;
 
 use crate::conn::{OwnedTftpPacket, PacketCheckResult, TftpConnState};
-use crate::proto::{TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ACCESS_VIOLATION, ERR_FILE_NOT_FOUND, ERR_INVALID_OPTIONS, ERR_NOT_DEFINED, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE, ERR_ILLEGAL_OPERATION};
+use crate::proto::{
+    TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ACCESS_VIOLATION, ERR_FILE_NOT_FOUND,
+    ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, ERR_NOT_DEFINED, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
+};
 
 pub struct TftpServer {
     socket: UdpSocket,
@@ -67,9 +70,10 @@ impl AsyncWrite for NullAsyncWrite {
     fn poll_write(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-        _buf: &[u8],
+        buf: &[u8],
     ) -> Poll<Result<usize, Error>> {
-        Poll::Ready(Ok(0))
+        println!("null write for {} bytes", buf.len());
+        Poll::Ready(Ok(buf.len()))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
@@ -84,7 +88,7 @@ impl AsyncWrite for NullAsyncWrite {
 #[async_trait]
 pub trait WriterFactory {
     async fn check_allow_write(&self, path: &str) -> bool;
-    async fn get_writer(&self, path: &str) -> io::Result<Box<dyn AsyncWrite + Send + Sync>>;
+    async fn get_writer(&self, path: &str) -> io::Result<Pin<Box<dyn AsyncWrite + Send + Sync>>>;
 }
 
 struct NullWriterFactory;
@@ -95,8 +99,8 @@ impl WriterFactory for NullWriterFactory {
         true
     }
 
-    async fn get_writer(&self, _path: &str) -> io::Result<Box<dyn AsyncWrite + Send + Sync>> {
-        Ok(Box::new(NullAsyncWrite) as Box<dyn AsyncWrite + Send + Sync>)
+    async fn get_writer(&self, _path: &str) -> io::Result<Pin<Box<dyn AsyncWrite + Send + Sync>>> {
+        Ok(Box::pin(NullAsyncWrite) as Pin<Box<dyn AsyncWrite + Send + Sync>>)
     }
 }
 
@@ -276,7 +280,7 @@ impl TftpServer {
         mut conn_state: TftpConnState,
         _mode: AsciiString,
         options: HashMap<String, String>,
-        _writer: Box<dyn AsyncWrite + Send + Sync>,
+        mut writer: Pin<Box<dyn AsyncWrite + Send + Sync>>,
     ) -> io::Result<()> {
         let mut current_block_num: u16 = 0;
         let mut block_size: u16 = DEFAULT_BLOCK_SIZE;
@@ -358,14 +362,20 @@ impl TftpServer {
             match next_data_packet.packet() {
                 TftpPacket::Data { block, data } => {
                     // Enforce invariant that `next_data_packet` will always be the expected block number.
-                    assert!(block == current_block_num, "block should always be the next block given invariants");
+                    assert!(
+                        block == current_block_num,
+                        "block should always be the next block given invariants"
+                    );
 
                     // Write the block to the writer.
-                    //  writer.write_all(data).await?;
+                    writer.as_mut().write_all(data).await?;
+
                     actual_transfer_size += data.len() as u32;
                     if let Some(size) = expected_transfer_size {
                         if actual_transfer_size > size {
-                            let _ = conn_state.send_error(ERR_ILLEGAL_OPERATION, b"size exceeded tsize option").await;
+                            let _ = conn_state
+                                .send_error(ERR_ILLEGAL_OPERATION, b"size exceeded tsize option")
+                                .await;
                             return Err(io::Error::from(io::ErrorKind::InvalidInput));
                         }
                     }
@@ -397,8 +407,8 @@ impl TftpServer {
                             _ => PacketCheckResult::Reject,
                         })
                         .await?;
-                },
-                _ => unreachable!()
+                }
+                _ => unreachable!(),
             };
         }
 
@@ -489,7 +499,7 @@ impl TftpServer {
                 }
 
                 let writer = match writer_factory.get_writer(filename.as_str()).await {
-                    Ok(w) => w as Box<dyn AsyncWrite + Send + Sync>,
+                    Ok(w) => w as Pin<Box<dyn AsyncWrite + Send + Sync>>,
                     Err(_) => {
                         let _ = conn_state
                             .send_error(ERR_NOT_DEFINED, b"server error")
