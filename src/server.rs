@@ -2,23 +2,24 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use ascii::{AsciiString, IntoAsciiString};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
+use futures::io::Error;
+use futures::task::{Context, Poll};
 use tokio::fs::File;
 use tokio::net::UdpSocket;
 use tokio::prelude::*;
 
 use crate::conn::{OwnedTftpPacket, PacketCheckResult, TftpConnState};
-use crate::proto::{
-    TftpPacket, DEFAULT_BLOCK_SIZE, ERR_FILE_NOT_FOUND, ERR_INVALID_OPTIONS, MAX_BLOCK_SIZE,
-    MIN_BLOCK_SIZE,
-};
+use crate::proto::{TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ACCESS_VIOLATION, ERR_FILE_NOT_FOUND, ERR_INVALID_OPTIONS, ERR_NOT_DEFINED, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE, ERR_ILLEGAL_OPERATION};
 
 pub struct TftpServer {
     socket: UdpSocket,
     reader_factory: Box<dyn ReaderFactory + Send + Sync>,
+    writer_factory: Box<dyn WriterFactory + Send + Sync>,
     local_addr: SocketAddr,
 }
 
@@ -56,9 +57,53 @@ impl ReaderFactory for NullReaderFactory {
     }
 }
 
+//
+// Writer support
+//
+
+struct NullAsyncWrite;
+
+impl AsyncWrite for NullAsyncWrite {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<Result<usize, Error>> {
+        Poll::Ready(Ok(0))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[async_trait]
+pub trait WriterFactory {
+    async fn check_allow_write(&self, path: &str) -> bool;
+    async fn get_writer(&self, path: &str) -> io::Result<Box<dyn AsyncWrite + Send + Sync>>;
+}
+
+struct NullWriterFactory;
+
+#[async_trait]
+impl WriterFactory for NullWriterFactory {
+    async fn check_allow_write(&self, _path: &str) -> bool {
+        true
+    }
+
+    async fn get_writer(&self, _path: &str) -> io::Result<Box<dyn AsyncWrite + Send + Sync>> {
+        Ok(Box::new(NullAsyncWrite) as Box<dyn AsyncWrite + Send + Sync>)
+    }
+}
+
 pub struct Builder {
     addr: SocketAddr,
     reader_factory: Option<Box<dyn ReaderFactory + Send + Sync>>,
+    writer_factory: Option<Box<dyn WriterFactory + Send + Sync>>,
 }
 
 impl Builder {
@@ -85,11 +130,23 @@ impl Builder {
         self.reader_factory(Box::new(FileReaderFactory { root: root }))
     }
 
+    pub fn writer_factory(
+        mut self,
+        writer_factory: Box<dyn WriterFactory + Send + Sync>,
+    ) -> Builder {
+        self.writer_factory = Some(writer_factory);
+        self
+    }
+
     pub async fn build(self) -> io::Result<TftpServer> {
         let reader_factory = self
             .reader_factory
             .unwrap_or(Box::new(NullReaderFactory) as Box<dyn ReaderFactory + Send + Sync>);
-        TftpServer::bind(&self.addr, reader_factory).await
+
+        let writer_factory = self.writer_factory.unwrap_or(Box::new(NullWriterFactory))
+            as Box<dyn WriterFactory + Send + Sync>;
+
+        TftpServer::bind(&self.addr, reader_factory, writer_factory).await
     }
 }
 
@@ -98,6 +155,7 @@ impl TftpServer {
         Builder {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
             reader_factory: None,
+            writer_factory: None,
         }
     }
 
@@ -168,11 +226,6 @@ impl TftpServer {
                 .await?;
         }
 
-        if let Some((code, message)) = option_err {
-            let _ = conn_state.send_error(code, message).await;
-            return Err(io::Error::from(io::ErrorKind::InvalidInput));
-        }
-
         loop {
             // Read in the next block of data.
             let mut n: u16 = file_bytes.len() as u16 - current_file_bytes_index;
@@ -219,9 +272,155 @@ impl TftpServer {
         Ok(())
     }
 
+    async fn do_write_request(
+        mut conn_state: TftpConnState,
+        _mode: AsciiString,
+        options: HashMap<String, String>,
+        _writer: Box<dyn AsyncWrite + Send + Sync>,
+    ) -> io::Result<()> {
+        let mut current_block_num: u16 = 0;
+        let mut block_size: u16 = DEFAULT_BLOCK_SIZE;
+        let mut option_err: Option<(u16, &'static [u8])> = None;
+        let mut expected_transfer_size: Option<u32> = None;
+        let mut actual_transfer_size: u32 = 0;
+        let mut reply_options: HashMap<&'static [u8], Box<str>> = HashMap::new();
+
+        if options.len() > 0 {
+            if let Some(requested_block_size_str) = options.get("blksize") {
+                let requested_block_size_str = requested_block_size_str.to_string();
+                match requested_block_size_str.parse::<u16>() {
+                    Ok(requested_block_size) => {
+                        if requested_block_size < MIN_BLOCK_SIZE {
+                            option_err = Some((ERR_INVALID_OPTIONS, b"Invalid blksize option"));
+                        } else if requested_block_size > MAX_BLOCK_SIZE {
+                            block_size = MAX_BLOCK_SIZE;
+                            reply_options
+                                .insert(b"blksize", block_size.to_string().into_boxed_str());
+                        } else {
+                            block_size = requested_block_size;
+                            reply_options
+                                .insert(b"blksize", block_size.to_string().into_boxed_str());
+                        }
+                    }
+                    Err(_) => {
+                        option_err = Some((ERR_INVALID_OPTIONS, b"Invalid blksize option"));
+                    }
+                }
+            }
+            if let Some(tsize_str) = options.get("tsize") {
+                match tsize_str.parse::<u32>() {
+                    Ok(tsize) => {
+                        expected_transfer_size = Some(tsize);
+                        reply_options.insert(b"tsize", tsize_str.to_string().into_boxed_str());
+                    }
+                    Err(_) => option_err = Some((ERR_INVALID_OPTIONS, b"Invalid tsize option")),
+                }
+            }
+        }
+
+        if let Some((code, message)) = option_err {
+            let _ = conn_state.send_error(code, message).await;
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+
+        let initial_packet_bytes = if reply_options.len() > 0 {
+            let reply_options_1 = reply_options
+                .iter()
+                .map(|(&k, ref v)| (k, v.as_bytes()))
+                .collect();
+            let packet = TftpPacket::OptionsAck(reply_options_1);
+            let mut buffer = BytesMut::with_capacity(packet.encoded_size());
+            packet.encode(&mut buffer);
+            buffer.freeze()
+        } else {
+            let packet = TftpPacket::Ack(current_block_num);
+            let mut buffer = BytesMut::with_capacity(packet.encoded_size());
+            packet.encode(&mut buffer);
+            buffer.freeze()
+        };
+
+        let mut next_data_packet = conn_state
+            .send_and_receive_next(initial_packet_bytes, |packet: &TftpPacket| match packet {
+                TftpPacket::Data { block, .. } => {
+                    if *block == current_block_num + 1 {
+                        PacketCheckResult::Accept
+                    } else {
+                        PacketCheckResult::Reject // reject any DATA blocks != 1 since this is start
+                    }
+                }
+                _ => PacketCheckResult::Reject,
+            })
+            .await?;
+
+        loop {
+            current_block_num += 1;
+
+            match next_data_packet.packet() {
+                TftpPacket::Data { block, data } => {
+                    // Enforce invariant that `next_data_packet` will always be the expected block number.
+                    assert!(block == current_block_num, "block should always be the next block given invariants");
+
+                    // Write the block to the writer.
+                    //  writer.write_all(data).await?;
+                    actual_transfer_size += data.len() as u32;
+                    if let Some(size) = expected_transfer_size {
+                        if actual_transfer_size > size {
+                            let _ = conn_state.send_error(ERR_ILLEGAL_OPERATION, b"size exceeded tsize option").await;
+                            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+                        }
+                    }
+
+                    // End loop if this packet has less than the full block size.
+                    // Final ACK will be sent outside of the loop (since we do not need to
+                    // wait for another DATA packet.
+                    if (data.len() as u16) < block_size {
+                        break;
+                    }
+
+                    // Send acknowledgement and wait for next DATA packet.
+                    let bytes = {
+                        let packet = TftpPacket::Ack(current_block_num);
+                        let mut buffer = BytesMut::with_capacity(packet.encoded_size());
+                        packet.encode(&mut buffer);
+                        buffer.freeze()
+                    };
+
+                    next_data_packet = conn_state
+                        .send_and_receive_next(bytes, |packet: &TftpPacket| match packet {
+                            TftpPacket::Data { block, .. } => {
+                                if *block == current_block_num + 1 {
+                                    PacketCheckResult::Accept
+                                } else {
+                                    PacketCheckResult::Ignore // ignore prior DATA packets
+                                }
+                            }
+                            _ => PacketCheckResult::Reject,
+                        })
+                        .await?;
+                },
+                _ => unreachable!()
+            };
+        }
+
+        let bytes = {
+            let packet = TftpPacket::Ack(current_block_num);
+            let mut buffer = BytesMut::with_capacity(packet.encoded_size());
+            packet.encode(&mut buffer);
+            buffer.freeze()
+        };
+        let _ = conn_state.send(&bytes).await?;
+
+        if conn_state.trace_packets {
+            println!("Transfer ended.");
+        }
+
+        Ok(())
+    }
+
     async fn do_request(
         request: OwnedTftpPacket,
         reader_factory: &Box<dyn ReaderFactory + Send + Sync>,
+        writer_factory: &Box<dyn WriterFactory + Send + Sync>,
     ) {
         // Bind a socket for this connection.
         let reply_bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
@@ -265,6 +464,48 @@ impl TftpServer {
                     ()
                 });
             }
+
+            TftpPacket::WriteRequest {
+                filename,
+                mode,
+                ref options,
+            } => {
+                let filename = filename.into_ascii_string().unwrap();
+                let mode = mode.into_ascii_string().unwrap();
+                let options = options
+                    .iter()
+                    .map(|(&k, &v)| {
+                        let k = k.into_ascii_string().unwrap().to_string();
+                        let v = v.into_ascii_string().unwrap().to_string();
+                        (k.to_ascii_lowercase(), v.to_ascii_lowercase())
+                    })
+                    .collect::<HashMap<_, _>>();
+
+                if !writer_factory.check_allow_write(filename.as_str()).await {
+                    let _ = conn_state
+                        .send_error(ERR_ACCESS_VIOLATION, b"access violation")
+                        .await;
+                    return;
+                }
+
+                let writer = match writer_factory.get_writer(filename.as_str()).await {
+                    Ok(w) => w as Box<dyn AsyncWrite + Send + Sync>,
+                    Err(_) => {
+                        let _ = conn_state
+                            .send_error(ERR_NOT_DEFINED, b"server error")
+                            .await;
+                        return;
+                    }
+                };
+
+                let write_fut = TftpServer::do_write_request(conn_state, mode, options, writer);
+
+                tokio::spawn(async move {
+                    let _ = write_fut.await;
+                    ()
+                });
+            }
+
             _ => {}
         }
 
@@ -280,13 +521,14 @@ impl TftpServer {
                 addr: remote_addr,
                 bytes: packet_bytes,
             };
-            TftpServer::do_request(owned_packet, &self.reader_factory).await;
+            TftpServer::do_request(owned_packet, &self.reader_factory, &self.writer_factory).await;
         }
     }
 
     pub async fn bind(
         addr: &SocketAddr,
         reader_factory: Box<dyn ReaderFactory + Send + Sync>,
+        writer_factory: Box<dyn WriterFactory + Send + Sync>,
     ) -> io::Result<TftpServer> {
         let socket = UdpSocket::bind(addr).await?;
         let local_addr = socket.local_addr().unwrap();
@@ -294,6 +536,7 @@ impl TftpServer {
         Ok(TftpServer {
             socket: socket,
             reader_factory: reader_factory,
+            writer_factory: writer_factory,
             local_addr: local_addr,
         })
     }
@@ -316,6 +559,7 @@ mod tests {
 
     use crate::testing::*;
 
+    use crate::server::{NullWriterFactory, WriterFactory};
     use async_trait::async_trait;
 
     struct TestReaderFactory {
@@ -350,8 +594,13 @@ mod tests {
         let mut server = {
             let reader_factory = Box::new(TestReaderFactory { data: data.clone() })
                 as Box<dyn ReaderFactory + std::marker::Send + Sync>;
+
             let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            TftpServer::bind(&server_addr, reader_factory)
+
+            let writer_factory =
+                Box::new(NullWriterFactory) as Box<dyn WriterFactory + std::marker::Send + Sync>;
+
+            TftpServer::bind(&server_addr, reader_factory, writer_factory)
                 .await
                 .unwrap()
         };

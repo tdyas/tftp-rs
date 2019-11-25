@@ -33,7 +33,7 @@ pub(crate) struct TftpConnState {
     socket: UdpSocket,
     main_remote_addr: Option<SocketAddr>,
     remote_addr: Option<SocketAddr>,
-    trace_packets: bool,
+    pub trace_packets: bool,
     max_retries: u16,
 }
 
