@@ -476,6 +476,8 @@ impl TftpServer {
             println!("Transfer ended.");
         }
 
+        let _ = writer.flush().await;
+
         Ok(())
     }
 
