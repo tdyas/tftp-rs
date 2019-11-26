@@ -882,7 +882,7 @@ mod tests {
     struct TestWriter {
         sender: Sender<WritenFile>,
         name: String,
-        buffer: Box<Option<Vec<u8>>>,
+        buffer: Option<Vec<u8>>,
     }
 
     impl Drop for TestWriter {
@@ -933,7 +933,7 @@ mod tests {
             let test_writer = TestWriter {
                 sender: self.sender.clone(),
                 name: path.to_string(),
-                buffer: Box::new(Some(Vec::new())),
+                buffer: Some(Vec::new()),
             };
             let pinned_writer: Pin<Box<dyn AsyncWrite + Send + Sync>> = Box::pin(test_writer);
             Ok(pinned_writer)
