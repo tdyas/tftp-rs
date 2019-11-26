@@ -356,7 +356,7 @@ impl TftpServer {
         options: HashMap<String, String>,
         writer: Box<AsyncWriteWithSend>,
     ) -> io::Result<()> {
-        let mut pinned_writer: Pin<Box<AsyncWriteWithSend>> = Pin::from(writer);
+        let mut writer: Pin<Box<AsyncWriteWithSend>> = Pin::from(writer);
 
         let mut current_block_num: u16 = 0;
         let mut block_size: u16 = DEFAULT_BLOCK_SIZE;
@@ -444,7 +444,7 @@ impl TftpServer {
                     );
 
                     // Write the block to the writer.
-                    pinned_writer.write_all(data).await?;
+                    writer.write_all(data).await?;
 
                     actual_transfer_size += data.len() as u32;
                     if let Some(size) = expected_transfer_size {
@@ -500,7 +500,7 @@ impl TftpServer {
             println!("Transfer ended.");
         }
 
-        let _ = pinned_writer.flush().await;
+        let _ = writer.flush().await;
 
         Ok(())
     }
