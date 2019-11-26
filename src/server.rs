@@ -923,7 +923,6 @@ mod tests {
     #[async_trait]
     impl WriterFactory for TestWriterFactory {
         async fn check_allow_write(&self, path: &str) -> bool {
-            println!("check_allow_write: path={}", path);
             path == "true"
         }
 
