@@ -91,12 +91,12 @@ pub trait WriterFactory {
     async fn get_writer(&self, path: &str) -> io::Result<Pin<Box<dyn AsyncWrite + Send + Sync>>>;
 }
 
-struct NullWriterFactory;
+struct NullWriterFactory(bool);
 
 #[async_trait]
 impl WriterFactory for NullWriterFactory {
     async fn check_allow_write(&self, _path: &str) -> bool {
-        true
+        self.0
     }
 
     async fn get_writer(&self, _path: &str) -> io::Result<Pin<Box<dyn AsyncWrite + Send + Sync>>> {
@@ -197,7 +197,9 @@ impl Builder {
             .reader_factory
             .unwrap_or(Box::new(NullReaderFactory) as Box<dyn ReaderFactory + Send + Sync>);
 
-        let writer_factory = self.writer_factory.unwrap_or(Box::new(NullWriterFactory))
+        let writer_factory = self
+            .writer_factory
+            .unwrap_or(Box::new(NullWriterFactory(false)))
             as Box<dyn WriterFactory + Send + Sync>;
 
         TftpServer::bind(&self.addr, reader_factory, writer_factory).await
@@ -613,14 +615,19 @@ mod tests {
     use std::net::SocketAddr;
 
     use bytes::{BufMut, Bytes, BytesMut};
+    use tokio::sync::mpsc::Sender;
 
     use super::{ReaderFactory, TftpServer};
     use crate::proto::{TftpPacket, ERR_INVALID_OPTIONS};
 
     use crate::testing::*;
 
-    use crate::server::{NullWriterFactory, WriterFactory};
+    use crate::server::{NullReaderFactory, NullWriterFactory, WriterFactory};
     use async_trait::async_trait;
+    use futures::io::Error;
+    use futures::task::{Context, Poll};
+    use std::pin::Pin;
+    use tokio::io::AsyncWrite;
 
     struct TestReaderFactory {
         data: Bytes,
@@ -657,8 +664,8 @@ mod tests {
 
             let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-            let writer_factory =
-                Box::new(NullWriterFactory) as Box<dyn WriterFactory + std::marker::Send + Sync>;
+            let writer_factory = Box::new(NullWriterFactory(false))
+                as Box<dyn WriterFactory + std::marker::Send + Sync>;
 
             TftpServer::bind(&server_addr, reader_factory, writer_factory)
                 .await
@@ -860,5 +867,176 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    // Full write request observed by TestWriterFactory
+    struct WritenFile {
+        name: String,
+        bytes: Vec<u8>,
+    }
+
+    struct TestWriterFactory {
+        sender: Sender<WritenFile>,
+    }
+
+    struct TestWriter {
+        sender: Sender<WritenFile>,
+        name: String,
+        buffer: Box<Option<Vec<u8>>>,
+    }
+
+    impl Drop for TestWriter {
+        fn drop(&mut self) {
+            if let Some(buffer) = self.buffer.take() {
+                let message = WritenFile {
+                    name: self.name.clone(),
+                    bytes: buffer,
+                };
+                if let Err(_) = self.sender.try_send(message) {
+                    panic!("unable to send result");
+                }
+            }
+        }
+    }
+
+    impl AsyncWrite for TestWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<Result<usize, Error>> {
+            Pin::new(self.buffer.as_mut().as_mut().unwrap()).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+            AsyncWrite::poll_flush(Pin::new(self.buffer.as_mut().as_mut().unwrap()), cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Error>> {
+            AsyncWrite::poll_shutdown(Pin::new(self.buffer.as_mut().as_mut().unwrap()), cx)
+        }
+    }
+
+    #[async_trait]
+    impl WriterFactory for TestWriterFactory {
+        async fn check_allow_write(&self, path: &str) -> bool {
+            println!("check_allow_write: path={}", path);
+            path == "true"
+        }
+
+        async fn get_writer(
+            &self,
+            path: &str,
+        ) -> Result<Pin<Box<dyn AsyncWrite + Send + Sync>>, Error> {
+            let test_writer = TestWriter {
+                sender: self.sender.clone(),
+                name: path.to_string(),
+                buffer: Box::new(Some(Vec::new())),
+            };
+            let pinned_writer: Pin<Box<dyn AsyncWrite + Send + Sync>> = Box::pin(test_writer);
+            Ok(pinned_writer)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_requests() {
+        println!("running test_write_requests");
+
+        let data = {
+            let mut b = BytesMut::with_capacity(2048);
+            for v in 0..b.capacity() {
+                b.put((v & 0xFF) as u8);
+            }
+            b.freeze()
+        };
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<WritenFile>(1);
+
+        let mut server = {
+            let reader_factory =
+                Box::new(NullReaderFactory) as Box<dyn ReaderFactory + std::marker::Send + Sync>;
+
+            let writer_factory = Box::new(TestWriterFactory { sender: sender });
+
+            let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+            TftpServer::bind(&server_addr, reader_factory, writer_factory)
+                .await
+                .unwrap()
+        };
+        let server_addr = server.local_addr().clone();
+        println!("server listening at {}", server_addr);
+
+        tokio::spawn(async move {
+            let _ = server.main_loop().await;
+            ()
+        });
+
+        use self::Op::*;
+        use self::TftpPacket::*;
+
+        let empty_options: HashMap<&[u8], &[u8]> = HashMap::new();
+
+        run_test(
+            &server_addr,
+            "basic write",
+            vec![
+                Send(mk(WriteRequest {
+                    filename: b"true",
+                    mode: b"octet",
+                    options: empty_options.clone(),
+                })),
+                Receive(mk(Ack(0))),
+                Send(mk(Data {
+                    block: 1,
+                    data: &data.slice(0, 512),
+                })),
+                Receive(mk(Ack(1))),
+                Send(mk(Data {
+                    block: 2,
+                    data: &data.slice(512, 768),
+                })),
+                Receive(mk(Ack(2))),
+            ],
+        )
+        .await;
+        let result = receiver.recv().await.expect("file was written");
+        assert_eq!(result.name, "true");
+        assert_eq!(result.bytes, data.slice(0, 768).to_vec());
+
+        run_test(
+            &server_addr,
+            "block-aligned write",
+            vec![
+                Send(mk(WriteRequest {
+                    filename: b"true",
+                    mode: b"octet",
+                    options: empty_options.clone(),
+                })),
+                Receive(mk(Ack(0))),
+                Send(mk(Data {
+                    block: 1,
+                    data: &data.slice(0, 512),
+                })),
+                Receive(mk(Ack(1))),
+                Send(mk(Data {
+                    block: 2,
+                    data: &data.slice(512, 1024),
+                })),
+                Receive(mk(Ack(2))),
+                Send(mk(Data {
+                    block: 3,
+                    data: &[],
+                })),
+                Receive(mk(Ack(3))),
+            ],
+        )
+        .await;
+        let result = receiver.recv().await.expect("file was written");
+        assert_eq!(result.name, "true");
+        assert_eq!(result.bytes, data.slice(0, 1024).to_vec());
     }
 }
