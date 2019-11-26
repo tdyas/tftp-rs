@@ -104,6 +104,51 @@ impl WriterFactory for NullWriterFactory {
     }
 }
 
+struct FileWriterFactory {
+    root: PathBuf,
+}
+
+struct FileWriter(Pin<Box<tokio::fs::File>>);
+
+impl AsyncWrite for FileWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, Error>> {
+        <tokio::fs::File as AsyncWrite>::poll_write(self.0.as_mut(), cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        <tokio::fs::File as AsyncWrite>::poll_flush(self.0.as_mut(), cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        <tokio::fs::File as AsyncWrite>::poll_shutdown(self.0.as_mut(), cx)
+    }
+}
+
+#[async_trait]
+impl WriterFactory for FileWriterFactory {
+    async fn check_allow_write(&self, path: &str) -> bool {
+        !path.contains("/") && !path.contains("..")
+    }
+
+    async fn get_writer(
+        &self,
+        path: &str,
+    ) -> Result<Pin<Box<dyn AsyncWrite + Send + Sync>>, Error> {
+        let path = self.root.as_path().join(path).to_owned();
+        match tokio::fs::metadata(path.clone()).await {
+            Ok(_) => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+            Err(_) => {
+                let file = tokio::fs::File::create(path.clone()).await?;
+                Ok(Box::pin(FileWriter(Box::pin(file))) as Pin<Box<dyn AsyncWrite + Send + Sync>>)
+            }
+        }
+    }
+}
+
 pub struct Builder {
     addr: SocketAddr,
     reader_factory: Option<Box<dyn ReaderFactory + Send + Sync>>,
@@ -140,6 +185,11 @@ impl Builder {
     ) -> Builder {
         self.writer_factory = Some(writer_factory);
         self
+    }
+
+    pub fn write_root<P: AsRef<Path>>(self, path: P) -> Builder {
+        let root = path.as_ref().to_path_buf();
+        self.writer_factory(Box::new(FileWriterFactory { root: root }))
     }
 
     pub async fn build(self) -> io::Result<TftpServer> {

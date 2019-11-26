@@ -8,6 +8,7 @@ async fn main() {
     let server = TftpServer::builder()
         .port(9090)
         .read_root(".")
+        .write_root(".")
         .build()
         .await
         .unwrap();
