@@ -638,25 +638,22 @@ mod tests {
     use std::convert::TryInto;
     use std::io;
     use std::net::SocketAddr;
+    use std::pin::Pin;
 
+    use async_trait::async_trait;
     use bytes::{BufMut, Bytes, BytesMut};
+    use futures::task::{Context, Poll};
+    use tokio::io::AsyncWrite;
     use tokio::prelude::*;
     use tokio::sync::mpsc::Sender;
 
     use super::{ReaderFactory, TftpServer};
     use crate::proto::{TftpPacket, ERR_ACCESS_VIOLATION, ERR_FILE_EXISTS, ERR_INVALID_OPTIONS};
-
-    use crate::testing::*;
-
     use crate::server::{
         AsyncReadWithSend, AsyncWriteWithSend, FileReaderFactory, FileWriterFactory,
         NullReaderFactory, NullWriterFactory, WriterFactory,
     };
-    use async_trait::async_trait;
-    use futures::io::Error;
-    use futures::task::{Context, Poll};
-    use std::pin::Pin;
-    use tokio::io::AsyncWrite;
+    use crate::testing::*;
 
     struct TestReaderFactory {
         data: Bytes,
@@ -938,18 +935,21 @@ mod tests {
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
             buf: &[u8],
-        ) -> Poll<Result<usize, Error>> {
+        ) -> Poll<Result<usize, io::Error>> {
             Pin::new(self.buffer.as_mut().as_mut().unwrap()).poll_write(cx, buf)
         }
 
-        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Result<(), io::Error>> {
             AsyncWrite::poll_flush(Pin::new(self.buffer.as_mut().as_mut().unwrap()), cx)
         }
 
         fn poll_shutdown(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
-        ) -> Poll<Result<(), Error>> {
+        ) -> Poll<Result<(), io::Error>> {
             AsyncWrite::poll_shutdown(Pin::new(self.buffer.as_mut().as_mut().unwrap()), cx)
         }
     }
