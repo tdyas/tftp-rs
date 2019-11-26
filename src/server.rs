@@ -679,15 +679,17 @@ mod tests {
         }
     }
 
+    fn make_data_bytes() -> Bytes {
+        let mut b = BytesMut::with_capacity(2048);
+        for v in 0..b.capacity() {
+            b.put((v & 0xFF) as u8);
+        }
+        b.freeze()
+    }
+
     #[tokio::test]
     async fn test_read_requests() {
-        let data = {
-            let mut b = BytesMut::with_capacity(2048);
-            for v in 0..b.capacity() {
-                b.put((v & 0xFF) as u8);
-            }
-            b.freeze()
-        };
+        let data = make_data_bytes();
 
         let mut server = {
             let reader_factory = Box::new(TestReaderFactory { data: data.clone() })
@@ -974,13 +976,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_requests() {
-        let data = {
-            let mut b = BytesMut::with_capacity(2048);
-            for v in 0..b.capacity() {
-                b.put((v & 0xFF) as u8);
-            }
-            b.freeze()
-        };
+        let data = make_data_bytes();
 
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<WritenFile>(1);
 
@@ -1105,13 +1101,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_factories() {
-        let data = {
-            let mut b = BytesMut::with_capacity(2048);
-            for v in 0..b.capacity() {
-                b.put((v & 0xFF) as u8);
-            }
-            b.freeze()
-        };
+        let data = make_data_bytes();
 
         let root = tempfile::tempdir().expect("temp directory created");
 
