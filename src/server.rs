@@ -34,8 +34,7 @@ type AsyncReadWithSend = dyn AsyncRead + Send;
 
 #[async_trait]
 pub trait ReaderFactory {
-    async fn get_reader(&self, path: &str)
-        -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)>;
+    async fn get_reader(&self, path: &str) -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)>;
 }
 
 struct FileReaderFactory {
@@ -44,10 +43,7 @@ struct FileReaderFactory {
 
 #[async_trait]
 impl ReaderFactory for FileReaderFactory {
-    async fn get_reader(
-        &self,
-        path: &str,
-    ) -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)> {
+    async fn get_reader(&self, path: &str) -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)> {
         let path = self.root.as_path().join(path).to_owned();
         match tokio::fs::metadata(path.clone()).await {
             Ok(stat) if stat.is_file() => match File::open(path).await {
@@ -63,10 +59,7 @@ struct NullReaderFactory;
 
 #[async_trait]
 impl ReaderFactory for NullReaderFactory {
-    async fn get_reader(
-        &self,
-        _path: &str,
-    ) -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)> {
+    async fn get_reader(&self, _path: &str) -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)> {
         Err(io::Error::from(io::ErrorKind::NotFound))
     }
 }
@@ -656,8 +649,8 @@ mod tests {
     use crate::testing::*;
 
     use crate::server::{
-        AsyncReadWithSend, AsyncWriteWithSend, FileWriterFactory, NullReaderFactory,
-        NullWriterFactory, WriterFactory,
+        AsyncReadWithSend, AsyncWriteWithSend, FileReaderFactory, FileWriterFactory,
+        NullReaderFactory, NullWriterFactory, WriterFactory,
     };
     use async_trait::async_trait;
     use futures::io::Error;
@@ -1111,7 +1104,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_requests_to_file() {
+    async fn test_file_factories() {
         let data = {
             let mut b = BytesMut::with_capacity(2048);
             for v in 0..b.capacity() {
@@ -1120,14 +1113,16 @@ mod tests {
             b.freeze()
         };
 
-        let write_root = tempfile::tempdir().expect("temp directory created");
+        let root = tempfile::tempdir().expect("temp directory created");
 
         let mut server = {
-            let reader_factory =
-                Box::new(NullReaderFactory) as Box<dyn ReaderFactory + std::marker::Send + Sync>;
+            let reader_factory = Box::new(FileReaderFactory {
+                root: root.path().to_owned(),
+            })
+                as Box<dyn ReaderFactory + std::marker::Send + Sync>;
 
             let writer_factory = Box::new(FileWriterFactory {
-                root: write_root.path().to_owned(),
+                root: root.path().to_owned(),
             });
 
             let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1149,12 +1144,41 @@ mod tests {
 
         let empty_options: HashMap<&[u8], &[u8]> = HashMap::new();
 
+        let mut input_file = tokio::fs::File::create(root.path().join("xyzzy"))
+            .await
+            .unwrap();
+        input_file.write_all(&data[0..768]).await.unwrap();
+        drop(input_file);
+
         run_test(
             &server_addr,
-            "basic write",
+            "read request",
+            vec![
+                Send(mk(ReadRequest {
+                    filename: b"xyzzy",
+                    mode: b"octet",
+                    options: HashMap::default(),
+                })),
+                Receive(mk(Data {
+                    block: 1,
+                    data: &data.slice(0, 512),
+                })),
+                Send(mk(Ack(1))),
+                Receive(mk(Data {
+                    block: 2,
+                    data: &data.slice(512, 768),
+                })),
+                Send(mk(Ack(2))),
+            ],
+        )
+        .await;
+
+        run_test(
+            &server_addr,
+            "write request",
             vec![
                 Send(mk(WriteRequest {
-                    filename: b"random.dat",
+                    filename: b"output",
                     mode: b"octet",
                     options: empty_options.clone(),
                 })),
@@ -1173,7 +1197,7 @@ mod tests {
         )
         .await;
 
-        let mut output_file = tokio::fs::File::open(write_root.path().join("random.dat"))
+        let mut output_file = tokio::fs::File::open(root.path().join("output"))
             .await
             .unwrap();
         let mut buffer: Vec<u8> = Vec::new();
