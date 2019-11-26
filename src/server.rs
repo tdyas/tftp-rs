@@ -30,12 +30,12 @@ pub struct TftpServer {
 // Reader support
 //
 
-type AsyncReadWithSendSync = dyn AsyncRead + Send + Sync;
+type AsyncReadWithSend = dyn AsyncRead + Send;
 
 #[async_trait]
 pub trait ReaderFactory {
     async fn get_reader(&self, path: &str)
-        -> io::Result<(Box<AsyncReadWithSendSync>, Option<u64>)>;
+        -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)>;
 }
 
 struct FileReaderFactory {
@@ -47,11 +47,11 @@ impl ReaderFactory for FileReaderFactory {
     async fn get_reader(
         &self,
         path: &str,
-    ) -> io::Result<(Box<AsyncReadWithSendSync>, Option<u64>)> {
+    ) -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)> {
         let path = self.root.as_path().join(path).to_owned();
         match tokio::fs::metadata(path.clone()).await {
             Ok(stat) if stat.is_file() => match File::open(path).await {
-                Ok(f) => Ok((Box::new(f) as Box<AsyncReadWithSendSync>, Some(stat.len()))),
+                Ok(f) => Ok((Box::new(f) as Box<AsyncReadWithSend>, Some(stat.len()))),
                 _ => Err(io::Error::from(io::ErrorKind::NotFound)),
             },
             _ => Err(io::Error::from(io::ErrorKind::NotFound)),
@@ -66,7 +66,7 @@ impl ReaderFactory for NullReaderFactory {
     async fn get_reader(
         &self,
         _path: &str,
-    ) -> io::Result<(Box<AsyncReadWithSendSync>, Option<u64>)> {
+    ) -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)> {
         Err(io::Error::from(io::ErrorKind::NotFound))
     }
 }
@@ -96,20 +96,20 @@ impl AsyncWrite for NullAsyncWrite {
     }
 }
 
-type AsyncWriteWithSendSync = dyn AsyncWrite + Send + Sync;
+type AsyncWriteWithSend = dyn AsyncWrite + Send;
 
 #[async_trait]
 pub trait WriterFactory {
-    async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSendSync>>;
+    async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSend>>;
 }
 
 struct NullWriterFactory(bool);
 
 #[async_trait]
 impl WriterFactory for NullWriterFactory {
-    async fn get_writer(&self, _path: &str) -> io::Result<Box<AsyncWriteWithSendSync>> {
+    async fn get_writer(&self, _path: &str) -> io::Result<Box<AsyncWriteWithSend>> {
         if self.0 {
-            let writer: Box<AsyncWriteWithSendSync> = Box::new(NullAsyncWrite);
+            let writer: Box<AsyncWriteWithSend> = Box::new(NullAsyncWrite);
             Ok(writer)
         } else {
             Err(io::Error::from(io::ErrorKind::PermissionDenied))
@@ -143,7 +143,7 @@ impl AsyncWrite for FileWriter {
 
 #[async_trait]
 impl WriterFactory for FileWriterFactory {
-    async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSendSync>> {
+    async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSend>> {
         let path = Path::new(path);
         let components = path.components().take(2).collect::<Vec<_>>();
         match components.get(0) {
@@ -159,7 +159,7 @@ impl WriterFactory for FileWriterFactory {
             Ok(_) => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
             Err(_) => {
                 let file = tokio::fs::File::create(path.clone()).await?;
-                let writer: Box<AsyncWriteWithSendSync> = Box::new(FileWriter(file));
+                let writer: Box<AsyncWriteWithSend> = Box::new(FileWriter(file));
                 Ok(writer)
             }
         }
@@ -236,10 +236,10 @@ impl TftpServer {
         mut conn_state: TftpConnState,
         _mode: AsciiString,
         options: HashMap<String, String>,
-        reader: Box<AsyncReadWithSendSync>,
+        reader: Box<AsyncReadWithSend>,
         reader_size_opt: Option<u64>,
     ) -> io::Result<()> {
-        let mut reader: Pin<Box<AsyncReadWithSendSync>> = Pin::from(reader);
+        let mut reader: Pin<Box<AsyncReadWithSend>> = Pin::from(reader);
 
         let mut current_block_num: u16 = 1;
         let mut block_size: usize = DEFAULT_BLOCK_SIZE as usize;
@@ -361,9 +361,9 @@ impl TftpServer {
         mut conn_state: TftpConnState,
         _mode: AsciiString,
         options: HashMap<String, String>,
-        writer: Box<AsyncWriteWithSendSync>,
+        writer: Box<AsyncWriteWithSend>,
     ) -> io::Result<()> {
-        let mut pinned_writer: Pin<Box<AsyncWriteWithSendSync>> = Pin::from(writer);
+        let mut pinned_writer: Pin<Box<AsyncWriteWithSend>> = Pin::from(writer);
 
         let mut current_block_num: u16 = 0;
         let mut block_size: u16 = DEFAULT_BLOCK_SIZE;
@@ -576,7 +576,7 @@ impl TftpServer {
                     })
                     .collect::<HashMap<_, _>>();
 
-                let writer: Box<AsyncWriteWithSendSync> =
+                let writer: Box<AsyncWriteWithSend> =
                     match writer_factory.get_writer(filename.as_str()).await {
                         Ok(w) => w,
                         Err(err) => {
@@ -656,7 +656,7 @@ mod tests {
     use crate::testing::*;
 
     use crate::server::{
-        AsyncReadWithSendSync, AsyncWriteWithSendSync, FileWriterFactory, NullReaderFactory,
+        AsyncReadWithSend, AsyncWriteWithSend, FileWriterFactory, NullReaderFactory,
         NullWriterFactory, WriterFactory,
     };
     use async_trait::async_trait;
@@ -674,11 +674,10 @@ mod tests {
         async fn get_reader(
             &self,
             path: &str,
-        ) -> io::Result<(Box<AsyncReadWithSendSync>, Option<u64>)> {
+        ) -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)> {
             let size = path.parse::<u64>().map_err(|_| io::ErrorKind::NotFound)?;
-            println!("read size = {}", size);
             let reader = io::Cursor::new(self.data.slice(0, size.try_into().unwrap()));
-            let reader: Box<AsyncReadWithSendSync> = Box::new(reader);
+            let reader: Box<AsyncReadWithSend> = Box::new(reader);
             Ok((reader, Some(size)))
         }
     }
@@ -964,12 +963,12 @@ mod tests {
 
     #[async_trait]
     impl WriterFactory for TestWriterFactory {
-        async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSendSync>> {
+        async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSend>> {
             match path {
                 "already_exists" => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
                 "denied" => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
                 _ => {
-                    let writer: Box<AsyncWriteWithSendSync> = Box::new(TestWriter {
+                    let writer: Box<AsyncWriteWithSend> = Box::new(TestWriter {
                         sender: self.sender.clone(),
                         name: path.to_string(),
                         buffer: Some(Vec::new()),
