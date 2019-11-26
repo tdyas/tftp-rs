@@ -659,7 +659,9 @@ mod tests {
     use tokio::sync::mpsc::Sender;
 
     use super::{ReaderFactory, TftpServer};
-    use crate::proto::{TftpPacket, ERR_ACCESS_VIOLATION, ERR_FILE_EXISTS, ERR_INVALID_OPTIONS};
+    use crate::proto::{
+        TftpPacket, ERR_ACCESS_VIOLATION, ERR_FILE_EXISTS, ERR_FILE_NOT_FOUND, ERR_INVALID_OPTIONS,
+    };
     use crate::server::{
         AsyncReadWithSend, AsyncWriteWithSend, FileReaderFactory, FileWriterFactory,
         NullReaderFactory, NullWriterFactory, WriterFactory,
@@ -1176,6 +1178,23 @@ mod tests {
 
         run_test(
             &server_addr,
+            "read request - file not found",
+            vec![
+                Send(mk(ReadRequest {
+                    filename: b"foobar",
+                    mode: b"octet",
+                    options: HashMap::default(),
+                })),
+                Receive(mk(Error {
+                    code: ERR_FILE_NOT_FOUND,
+                    message: b"File not found",
+                })),
+            ],
+        )
+        .await;
+
+        run_test(
+            &server_addr,
             "write request",
             vec![
                 Send(mk(WriteRequest {
@@ -1205,5 +1224,22 @@ mod tests {
         output_file.read_to_end(&mut buffer).await.unwrap();
         assert_eq!(768, buffer.len());
         assert_eq!(buffer, data.slice(0, 768));
+
+        run_test(
+            &server_addr,
+            "write request - file exists",
+            vec![
+                Send(mk(WriteRequest {
+                    filename: b"output",
+                    mode: b"octet",
+                    options: empty_options.clone(),
+                })),
+                Receive(mk(Error {
+                    code: ERR_FILE_EXISTS,
+                    message: b"File exists",
+                })),
+            ],
+        )
+        .await;
     }
 }
