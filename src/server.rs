@@ -16,7 +16,7 @@ use tokio::prelude::*;
 use crate::conn::{OwnedTftpPacket, PacketCheckResult, TftpConnState};
 use crate::proto::{
     TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ACCESS_VIOLATION, ERR_FILE_EXISTS, ERR_FILE_NOT_FOUND,
-    ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
+    ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, ERR_NOT_DEFINED, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
 };
 
 pub struct TftpServer {
@@ -26,9 +26,16 @@ pub struct TftpServer {
     local_addr: SocketAddr,
 }
 
+//
+// Reader support
+//
+
+type AsyncReadWithSendSync = dyn AsyncRead + Send + Sync;
+
 #[async_trait]
 pub trait ReaderFactory {
-    async fn get_reader(&self, path: &str) -> io::Result<Bytes>;
+    async fn get_reader(&self, path: &str)
+        -> io::Result<(Box<AsyncReadWithSendSync>, Option<u64>)>;
 }
 
 struct FileReaderFactory {
@@ -37,16 +44,17 @@ struct FileReaderFactory {
 
 #[async_trait]
 impl ReaderFactory for FileReaderFactory {
-    async fn get_reader(&self, path: &str) -> io::Result<Bytes> {
+    async fn get_reader(
+        &self,
+        path: &str,
+    ) -> io::Result<(Box<AsyncReadWithSendSync>, Option<u64>)> {
         let path = self.root.as_path().join(path).to_owned();
-        let stat = tokio::fs::metadata(path.clone()).await?;
-        if stat.is_file() {
-            let mut file = File::open(path.clone()).await?;
-            let mut contents = vec![];
-            file.read_to_end(&mut contents).await?;
-            Ok(Bytes::from(contents))
-        } else {
-            Err(io::Error::from(io::ErrorKind::NotFound))
+        match tokio::fs::metadata(path.clone()).await {
+            Ok(stat) if stat.is_file() => match File::open(path).await {
+                Ok(f) => Ok((Box::new(f) as Box<AsyncReadWithSendSync>, Some(stat.len()))),
+                _ => Err(io::Error::from(io::ErrorKind::NotFound)),
+            },
+            _ => Err(io::Error::from(io::ErrorKind::NotFound)),
         }
     }
 }
@@ -55,7 +63,10 @@ struct NullReaderFactory;
 
 #[async_trait]
 impl ReaderFactory for NullReaderFactory {
-    async fn get_reader(&self, _path: &str) -> io::Result<Bytes> {
+    async fn get_reader(
+        &self,
+        _path: &str,
+    ) -> io::Result<(Box<AsyncReadWithSendSync>, Option<u64>)> {
         Err(io::Error::from(io::ErrorKind::NotFound))
     }
 }
@@ -225,13 +236,15 @@ impl TftpServer {
         mut conn_state: TftpConnState,
         _mode: AsciiString,
         options: HashMap<String, String>,
-        file_bytes: Bytes,
+        reader: Box<AsyncReadWithSendSync>,
+        reader_size_opt: Option<u64>,
     ) -> io::Result<()> {
+        let mut reader: Pin<Box<AsyncReadWithSendSync>> = Pin::from(reader);
+
         let mut current_block_num: u16 = 1;
-        let mut block_size: u16 = DEFAULT_BLOCK_SIZE;
+        let mut block_size: usize = DEFAULT_BLOCK_SIZE as usize;
         let mut option_err: Option<(u16, &'static [u8])> = None;
         let mut reply_options: HashMap<&'static [u8], Box<str>> = HashMap::new();
-        let mut current_file_bytes_index: u16 = 0;
 
         if options.len() > 0 {
             if let Some(requested_block_size_str) = options.get("blksize") {
@@ -241,11 +254,11 @@ impl TftpServer {
                         if requested_block_size < MIN_BLOCK_SIZE {
                             option_err = Some((ERR_INVALID_OPTIONS, b"Invalid blksize option"));
                         } else if requested_block_size > MAX_BLOCK_SIZE {
-                            block_size = MAX_BLOCK_SIZE;
+                            block_size = MAX_BLOCK_SIZE as usize;
                             reply_options
                                 .insert(b"blksize", block_size.to_string().into_boxed_str());
                         } else {
-                            block_size = requested_block_size;
+                            block_size = requested_block_size as usize;
                             reply_options
                                 .insert(b"blksize", block_size.to_string().into_boxed_str());
                         }
@@ -258,8 +271,8 @@ impl TftpServer {
             if let Some(tsize_str) = options.get("tsize") {
                 if tsize_str != "0" {
                     option_err = Some((ERR_INVALID_OPTIONS, b"Invalid tsize option"));
-                } else {
-                    reply_options.insert(b"tsize", file_bytes.len().to_string().into_boxed_str());
+                } else if let Some(size) = reader_size_opt {
+                    reply_options.insert(b"tsize", size.to_string().into_boxed_str());
                 }
             }
         }
@@ -288,26 +301,36 @@ impl TftpServer {
                 .await?;
         }
 
+        let mut buffer: Vec<u8> = vec![0; block_size as usize];
+
         loop {
             // Read in the next block of data.
-            let mut n: u16 = file_bytes.len() as u16 - current_file_bytes_index;
-            if n > block_size {
-                n = block_size;
+            let mut data_len: usize = 0;
+            while data_len < block_size {
+                match reader.read(&mut buffer[data_len..]).await {
+                    Ok(n) => {
+                        data_len += n;
+                        if data_len == block_size || n == 0 {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = conn_state.send_error(ERR_NOT_DEFINED, b"Read error").await;
+                        return Err(err);
+                    }
+                }
             }
 
             let data_packet_bytes = {
                 let packet = TftpPacket::Data {
                     block: current_block_num,
-                    data: &file_bytes[current_file_bytes_index as usize
-                        ..(current_file_bytes_index + n) as usize],
+                    data: &buffer[0..data_len],
                 };
                 let mut buffer = BytesMut::with_capacity(packet.encoded_size());
                 packet.encode(&mut buffer);
 
                 buffer.freeze()
             };
-
-            current_file_bytes_index += n;
 
             let _ = conn_state
                 .send_and_receive_next(data_packet_bytes.clone(), |packet| match packet {
@@ -325,7 +348,7 @@ impl TftpServer {
                 .await?;
             current_block_num += 1;
 
-            if n < block_size {
+            if data_len < block_size {
                 break;
             }
         }
@@ -518,8 +541,8 @@ impl TftpServer {
                     .collect::<HashMap<_, _>>();
 
                 let filename_copy = filename.to_string();
-                let file_bytes = match reader_factory.get_reader(&filename_copy).await {
-                    Ok(bytes) => bytes,
+                let (reader, size_opt) = match reader_factory.get_reader(&filename_copy).await {
+                    Ok((reader, size_opt)) => (reader, size_opt),
                     Err(_) => {
                         let _ = conn_state
                             .send_error(ERR_FILE_NOT_FOUND, b"File not found")
@@ -529,7 +552,7 @@ impl TftpServer {
                 };
 
                 let read_fut =
-                    TftpServer::do_read_request(conn_state, mode, options, file_bytes.into());
+                    TftpServer::do_read_request(conn_state, mode, options, reader, size_opt);
 
                 tokio::spawn(async move {
                     let _ = read_fut.await;
@@ -619,6 +642,7 @@ impl TftpServer {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::convert::TryInto;
     use std::io;
     use std::net::SocketAddr;
 
@@ -632,8 +656,8 @@ mod tests {
     use crate::testing::*;
 
     use crate::server::{
-        AsyncWriteWithSendSync, FileWriterFactory, NullReaderFactory, NullWriterFactory,
-        WriterFactory,
+        AsyncReadWithSendSync, AsyncWriteWithSendSync, FileWriterFactory, NullReaderFactory,
+        NullWriterFactory, WriterFactory,
     };
     use async_trait::async_trait;
     use futures::io::Error;
@@ -647,9 +671,15 @@ mod tests {
 
     #[async_trait]
     impl ReaderFactory for TestReaderFactory {
-        async fn get_reader(&self, path: &str) -> io::Result<Bytes> {
-            let size = path.parse::<usize>().map_err(|_| io::ErrorKind::NotFound)?;
-            Ok(self.data.slice(0, size))
+        async fn get_reader(
+            &self,
+            path: &str,
+        ) -> io::Result<(Box<AsyncReadWithSendSync>, Option<u64>)> {
+            let size = path.parse::<u64>().map_err(|_| io::ErrorKind::NotFound)?;
+            println!("read size = {}", size);
+            let reader = io::Cursor::new(self.data.slice(0, size.try_into().unwrap()));
+            let reader: Box<AsyncReadWithSendSync> = Box::new(reader);
+            Ok((reader, Some(size)))
         }
     }
 
