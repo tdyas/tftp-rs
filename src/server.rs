@@ -37,8 +37,16 @@ pub trait ReaderFactory {
     async fn get_reader(&self, path: &str) -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)>;
 }
 
-struct FileReaderFactory {
+pub struct FileReaderFactory {
     root: PathBuf,
+}
+
+impl FileReaderFactory {
+    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+        FileReaderFactory {
+            root: path.as_ref().to_path_buf(),
+        }
+    }
 }
 
 #[async_trait]
@@ -55,7 +63,7 @@ impl ReaderFactory for FileReaderFactory {
     }
 }
 
-struct NullReaderFactory;
+pub struct NullReaderFactory;
 
 #[async_trait]
 impl ReaderFactory for NullReaderFactory {
@@ -96,22 +104,25 @@ pub trait WriterFactory {
     async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSend>>;
 }
 
-struct NullWriterFactory(bool);
+pub struct NullWriterFactory;
 
 #[async_trait]
 impl WriterFactory for NullWriterFactory {
     async fn get_writer(&self, _path: &str) -> io::Result<Box<AsyncWriteWithSend>> {
-        if self.0 {
-            let writer: Box<AsyncWriteWithSend> = Box::new(NullAsyncWrite);
-            Ok(writer)
-        } else {
-            Err(io::Error::from(io::ErrorKind::PermissionDenied))
-        }
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
     }
 }
 
-struct FileWriterFactory {
+pub struct FileWriterFactory {
     root: PathBuf,
+}
+
+impl FileWriterFactory {
+    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+        FileWriterFactory {
+            root: path.as_ref().to_path_buf(),
+        }
+    }
 }
 
 struct FileWriter(tokio::fs::File);
@@ -159,6 +170,10 @@ impl WriterFactory for FileWriterFactory {
     }
 }
 
+//
+// Server builder support
+//
+
 pub struct Builder {
     addr: SocketAddr,
     reader_factory: Option<Box<dyn ReaderFactory + Send + Sync>>,
@@ -185,8 +200,7 @@ impl Builder {
     }
 
     pub fn read_root<P: AsRef<Path>>(self, path: P) -> Builder {
-        let root = path.as_ref().to_path_buf();
-        self.reader_factory(Box::new(FileReaderFactory { root: root }))
+        self.reader_factory(Box::new(FileReaderFactory::new(path)))
     }
 
     pub fn writer_factory(
@@ -198,8 +212,7 @@ impl Builder {
     }
 
     pub fn write_root<P: AsRef<Path>>(self, path: P) -> Builder {
-        let root = path.as_ref().to_path_buf();
-        self.writer_factory(Box::new(FileWriterFactory { root: root }))
+        self.writer_factory(Box::new(FileWriterFactory::new(path)))
     }
 
     pub async fn build(self) -> io::Result<TftpServer> {
@@ -207,9 +220,7 @@ impl Builder {
             .reader_factory
             .unwrap_or(Box::new(NullReaderFactory) as Box<dyn ReaderFactory + Send + Sync>);
 
-        let writer_factory = self
-            .writer_factory
-            .unwrap_or(Box::new(NullWriterFactory(false)))
+        let writer_factory = self.writer_factory.unwrap_or(Box::new(NullWriterFactory))
             as Box<dyn WriterFactory + Send + Sync>;
 
         TftpServer::bind(&self.addr, reader_factory, writer_factory).await
@@ -697,8 +708,8 @@ mod tests {
 
             let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-            let writer_factory = Box::new(NullWriterFactory(false))
-                as Box<dyn WriterFactory + std::marker::Send + Sync>;
+            let writer_factory =
+                Box::new(NullWriterFactory) as Box<dyn WriterFactory + std::marker::Send + Sync>;
 
             TftpServer::bind(&server_addr, reader_factory, writer_factory)
                 .await
