@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 
 use ascii::{AsciiString, IntoAsciiString};
@@ -15,8 +15,8 @@ use tokio::prelude::*;
 
 use crate::conn::{OwnedTftpPacket, PacketCheckResult, TftpConnState};
 use crate::proto::{
-    TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ACCESS_VIOLATION, ERR_FILE_NOT_FOUND,
-    ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, ERR_NOT_DEFINED, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
+    TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ACCESS_VIOLATION, ERR_FILE_EXISTS, ERR_FILE_NOT_FOUND,
+    ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
 };
 
 pub struct TftpServer {
@@ -89,7 +89,6 @@ type AsyncWriteWithSendSync = dyn AsyncWrite + Send + Sync;
 
 #[async_trait]
 pub trait WriterFactory {
-    async fn check_allow_write(&self, path: &str) -> bool;
     async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSendSync>>;
 }
 
@@ -97,13 +96,13 @@ struct NullWriterFactory(bool);
 
 #[async_trait]
 impl WriterFactory for NullWriterFactory {
-    async fn check_allow_write(&self, _path: &str) -> bool {
-        self.0
-    }
-
     async fn get_writer(&self, _path: &str) -> io::Result<Box<AsyncWriteWithSendSync>> {
-        let writer: Box<AsyncWriteWithSendSync> = Box::new(NullAsyncWrite);
-        Ok(writer)
+        if self.0 {
+            let writer: Box<AsyncWriteWithSendSync> = Box::new(NullAsyncWrite);
+            Ok(writer)
+        } else {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        }
     }
 }
 
@@ -133,11 +132,17 @@ impl AsyncWrite for FileWriter {
 
 #[async_trait]
 impl WriterFactory for FileWriterFactory {
-    async fn check_allow_write(&self, path: &str) -> bool {
-        !path.contains("/") && !path.contains("..")
-    }
-
     async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSendSync>> {
+        let path = Path::new(path);
+        let components = path.components().take(2).collect::<Vec<_>>();
+        match components.get(0) {
+            // Allow single-component paths without reference to other directories or root.
+            Some(Component::Normal(_)) if components.len() == 1 => (),
+
+            // Deny everything else.
+            _ => return Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        };
+
         let path = self.root.as_path().join(path).to_owned();
         match tokio::fs::metadata(path.clone()).await {
             Ok(_) => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
@@ -548,20 +553,17 @@ impl TftpServer {
                     })
                     .collect::<HashMap<_, _>>();
 
-                if !writer_factory.check_allow_write(filename.as_str()).await {
-                    let _ = conn_state
-                        .send_error(ERR_ACCESS_VIOLATION, b"access violation")
-                        .await;
-                    return;
-                }
-
                 let writer: Box<AsyncWriteWithSendSync> =
                     match writer_factory.get_writer(filename.as_str()).await {
                         Ok(w) => w,
-                        Err(_) => {
-                            let _ = conn_state
-                                .send_error(ERR_NOT_DEFINED, b"server error")
-                                .await;
+                        Err(err) => {
+                            let (code, msg) = match err.kind() {
+                                io::ErrorKind::AlreadyExists => {
+                                    (ERR_FILE_EXISTS, b"File exists" as &[u8])
+                                }
+                                _ => (ERR_ACCESS_VIOLATION, b"Access violation" as &[u8]),
+                            };
+                            let _ = conn_state.send_error(code, msg).await;
                             return;
                         }
                     };
@@ -625,7 +627,7 @@ mod tests {
     use tokio::sync::mpsc::Sender;
 
     use super::{ReaderFactory, TftpServer};
-    use crate::proto::{TftpPacket, ERR_INVALID_OPTIONS};
+    use crate::proto::{TftpPacket, ERR_ACCESS_VIOLATION, ERR_FILE_EXISTS, ERR_INVALID_OPTIONS};
 
     use crate::testing::*;
 
@@ -932,17 +934,19 @@ mod tests {
 
     #[async_trait]
     impl WriterFactory for TestWriterFactory {
-        async fn check_allow_write(&self, path: &str) -> bool {
-            path == "true"
-        }
-
         async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSendSync>> {
-            let writer: Box<AsyncWriteWithSendSync> = Box::new(TestWriter {
-                sender: self.sender.clone(),
-                name: path.to_string(),
-                buffer: Some(Vec::new()),
-            });
-            Ok(writer)
+            match path {
+                "already_exists" => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+                "denied" => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+                _ => {
+                    let writer: Box<AsyncWriteWithSendSync> = Box::new(TestWriter {
+                        sender: self.sender.clone(),
+                        name: path.to_string(),
+                        buffer: Some(Vec::new()),
+                    });
+                    Ok(writer)
+                }
+            }
         }
     }
 
@@ -988,7 +992,7 @@ mod tests {
             "basic write",
             vec![
                 Send(mk(WriteRequest {
-                    filename: b"true",
+                    filename: b"xyzzy",
                     mode: b"octet",
                     options: empty_options.clone(),
                 })),
@@ -1007,7 +1011,7 @@ mod tests {
         )
         .await;
         let result = receiver.recv().await.expect("file was written");
-        assert_eq!(result.name, "true");
+        assert_eq!(result.name, "xyzzy");
         assert_eq!(result.bytes, data.slice(0, 768).to_vec());
 
         run_test(
@@ -1015,7 +1019,7 @@ mod tests {
             "block-aligned write",
             vec![
                 Send(mk(WriteRequest {
-                    filename: b"true",
+                    filename: b"xyzzy",
                     mode: b"octet",
                     options: empty_options.clone(),
                 })),
@@ -1039,8 +1043,42 @@ mod tests {
         )
         .await;
         let result = receiver.recv().await.expect("file was written");
-        assert_eq!(result.name, "true");
+        assert_eq!(result.name, "xyzzy");
         assert_eq!(result.bytes, data.slice(0, 1024).to_vec());
+
+        run_test(
+            &server_addr,
+            "file exists error",
+            vec![
+                Send(mk(WriteRequest {
+                    filename: b"already_exists",
+                    mode: b"octet",
+                    options: empty_options.clone(),
+                })),
+                Receive(mk(Error {
+                    code: ERR_FILE_EXISTS,
+                    message: b"File exists",
+                })),
+            ],
+        )
+        .await;
+
+        run_test(
+            &server_addr,
+            "file exists error",
+            vec![
+                Send(mk(WriteRequest {
+                    filename: b"denied",
+                    mode: b"octet",
+                    options: empty_options.clone(),
+                })),
+                Receive(mk(Error {
+                    code: ERR_ACCESS_VIOLATION,
+                    message: b"Access violation",
+                })),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
