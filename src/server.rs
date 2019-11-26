@@ -1119,14 +1119,11 @@ mod tests {
         let root = tempfile::tempdir().expect("temp directory created");
 
         let mut server = {
-            let reader_factory = Box::new(FileReaderFactory {
-                root: root.path().to_owned(),
-            })
+            let reader_factory = Box::new(FileReaderFactory::new(&root))
                 as Box<dyn ReaderFactory + std::marker::Send + Sync>;
 
-            let writer_factory = Box::new(FileWriterFactory {
-                root: root.path().to_owned(),
-            });
+            let writer_factory = Box::new(FileWriterFactory::new(&root))
+                as Box<dyn WriterFactory + std::marker::Send + Sync>;
 
             let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
