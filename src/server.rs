@@ -85,10 +85,12 @@ impl AsyncWrite for NullAsyncWrite {
     }
 }
 
+type AsyncWriteWithSendSync = dyn AsyncWrite + Send + Sync;
+
 #[async_trait]
 pub trait WriterFactory {
     async fn check_allow_write(&self, path: &str) -> bool;
-    async fn get_writer(&self, path: &str) -> io::Result<Pin<Box<dyn AsyncWrite + Send + Sync>>>;
+    async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSendSync>>;
 }
 
 struct NullWriterFactory(bool);
@@ -99,8 +101,9 @@ impl WriterFactory for NullWriterFactory {
         self.0
     }
 
-    async fn get_writer(&self, _path: &str) -> io::Result<Pin<Box<dyn AsyncWrite + Send + Sync>>> {
-        Ok(Box::pin(NullAsyncWrite) as Pin<Box<dyn AsyncWrite + Send + Sync>>)
+    async fn get_writer(&self, _path: &str) -> io::Result<Box<AsyncWriteWithSendSync>> {
+        let writer: Box<AsyncWriteWithSendSync> = Box::new(NullAsyncWrite);
+        Ok(writer)
     }
 }
 
@@ -108,23 +111,23 @@ struct FileWriterFactory {
     root: PathBuf,
 }
 
-struct FileWriter(Pin<Box<tokio::fs::File>>);
+struct FileWriter(tokio::fs::File);
 
 impl AsyncWrite for FileWriter {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, Error>> {
-        self.0.as_mut().poll_write(cx, buf)
+        Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        self.0.as_mut().poll_flush(cx)
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut self.get_mut().0).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        self.0.as_mut().poll_shutdown(cx)
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
     }
 }
 
@@ -134,16 +137,14 @@ impl WriterFactory for FileWriterFactory {
         !path.contains("/") && !path.contains("..")
     }
 
-    async fn get_writer(
-        &self,
-        path: &str,
-    ) -> Result<Pin<Box<dyn AsyncWrite + Send + Sync>>, Error> {
+    async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSendSync>> {
         let path = self.root.as_path().join(path).to_owned();
         match tokio::fs::metadata(path.clone()).await {
             Ok(_) => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
             Err(_) => {
                 let file = tokio::fs::File::create(path.clone()).await?;
-                Ok(Box::pin(FileWriter(Box::pin(file))) as Pin<Box<dyn AsyncWrite + Send + Sync>>)
+                let writer: Box<AsyncWriteWithSendSync> = Box::new(FileWriter(file));
+                Ok(writer)
             }
         }
     }
@@ -332,8 +333,10 @@ impl TftpServer {
         mut conn_state: TftpConnState,
         _mode: AsciiString,
         options: HashMap<String, String>,
-        mut writer: Pin<Box<dyn AsyncWrite + Send + Sync>>,
+        writer: Box<AsyncWriteWithSendSync>,
     ) -> io::Result<()> {
+        let mut pinned_writer: Pin<Box<AsyncWriteWithSendSync>> = Pin::from(writer);
+
         let mut current_block_num: u16 = 0;
         let mut block_size: u16 = DEFAULT_BLOCK_SIZE;
         let mut option_err: Option<(u16, &'static [u8])> = None;
@@ -420,7 +423,7 @@ impl TftpServer {
                     );
 
                     // Write the block to the writer.
-                    writer.as_mut().write_all(data).await?;
+                    pinned_writer.write_all(data).await?;
 
                     actual_transfer_size += data.len() as u32;
                     if let Some(size) = expected_transfer_size {
@@ -476,7 +479,7 @@ impl TftpServer {
             println!("Transfer ended.");
         }
 
-        let _ = writer.flush().await;
+        let _ = pinned_writer.flush().await;
 
         Ok(())
     }
@@ -552,15 +555,16 @@ impl TftpServer {
                     return;
                 }
 
-                let writer = match writer_factory.get_writer(filename.as_str()).await {
-                    Ok(w) => w as Pin<Box<dyn AsyncWrite + Send + Sync>>,
-                    Err(_) => {
-                        let _ = conn_state
-                            .send_error(ERR_NOT_DEFINED, b"server error")
-                            .await;
-                        return;
-                    }
-                };
+                let writer: Box<AsyncWriteWithSendSync> =
+                    match writer_factory.get_writer(filename.as_str()).await {
+                        Ok(w) => w,
+                        Err(_) => {
+                            let _ = conn_state
+                                .send_error(ERR_NOT_DEFINED, b"server error")
+                                .await;
+                            return;
+                        }
+                    };
 
                 let write_fut = TftpServer::do_write_request(conn_state, mode, options, writer);
 
@@ -625,7 +629,10 @@ mod tests {
 
     use crate::testing::*;
 
-    use crate::server::{FileWriterFactory, NullReaderFactory, NullWriterFactory, WriterFactory};
+    use crate::server::{
+        AsyncWriteWithSendSync, FileWriterFactory, NullReaderFactory, NullWriterFactory,
+        WriterFactory,
+    };
     use async_trait::async_trait;
     use futures::io::Error;
     use futures::task::{Context, Poll};
@@ -929,17 +936,13 @@ mod tests {
             path == "true"
         }
 
-        async fn get_writer(
-            &self,
-            path: &str,
-        ) -> Result<Pin<Box<dyn AsyncWrite + Send + Sync>>, Error> {
-            let test_writer = TestWriter {
+        async fn get_writer(&self, path: &str) -> io::Result<Box<AsyncWriteWithSendSync>> {
+            let writer: Box<AsyncWriteWithSendSync> = Box::new(TestWriter {
                 sender: self.sender.clone(),
                 name: path.to_string(),
                 buffer: Some(Vec::new()),
-            };
-            let pinned_writer: Pin<Box<dyn AsyncWrite + Send + Sync>> = Box::pin(test_writer);
-            Ok(pinned_writer)
+            });
+            Ok(writer)
         }
     }
 
