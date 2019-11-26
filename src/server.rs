@@ -617,6 +617,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use bytes::{BufMut, Bytes, BytesMut};
+    use tokio::prelude::*;
     use tokio::sync::mpsc::Sender;
 
     use super::{ReaderFactory, TftpServer};
@@ -624,7 +625,7 @@ mod tests {
 
     use crate::testing::*;
 
-    use crate::server::{NullReaderFactory, NullWriterFactory, WriterFactory};
+    use crate::server::{FileWriterFactory, NullReaderFactory, NullWriterFactory, WriterFactory};
     use async_trait::async_trait;
     use futures::io::Error;
     use futures::task::{Context, Poll};
@@ -944,8 +945,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_requests() {
-        println!("running test_write_requests");
-
         let data = {
             let mut b = BytesMut::with_capacity(2048);
             for v in 0..b.capacity() {
@@ -1039,5 +1038,77 @@ mod tests {
         let result = receiver.recv().await.expect("file was written");
         assert_eq!(result.name, "true");
         assert_eq!(result.bytes, data.slice(0, 1024).to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_write_requests_to_file() {
+        let data = {
+            let mut b = BytesMut::with_capacity(2048);
+            for v in 0..b.capacity() {
+                b.put((v & 0xFF) as u8);
+            }
+            b.freeze()
+        };
+
+        let write_root = tempfile::tempdir().expect("temp directory created");
+
+        let mut server = {
+            let reader_factory =
+                Box::new(NullReaderFactory) as Box<dyn ReaderFactory + std::marker::Send + Sync>;
+
+            let writer_factory = Box::new(FileWriterFactory {
+                root: write_root.path().to_owned(),
+            });
+
+            let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+            TftpServer::bind(&server_addr, reader_factory, writer_factory)
+                .await
+                .unwrap()
+        };
+        let server_addr = server.local_addr().clone();
+        println!("server listening at {}", server_addr);
+
+        tokio::spawn(async move {
+            let _ = server.main_loop().await;
+            ()
+        });
+
+        use self::Op::*;
+        use self::TftpPacket::*;
+
+        let empty_options: HashMap<&[u8], &[u8]> = HashMap::new();
+
+        run_test(
+            &server_addr,
+            "basic write",
+            vec![
+                Send(mk(WriteRequest {
+                    filename: b"true",
+                    mode: b"octet",
+                    options: empty_options.clone(),
+                })),
+                Receive(mk(Ack(0))),
+                Send(mk(Data {
+                    block: 1,
+                    data: &data.slice(0, 512),
+                })),
+                Receive(mk(Ack(1))),
+                Send(mk(Data {
+                    block: 2,
+                    data: &data.slice(512, 768),
+                })),
+                Receive(mk(Ack(2))),
+            ],
+        )
+        .await;
+
+        let mut output_file = tokio::fs::File::open(write_root.path().join("true"))
+            .await
+            .unwrap();
+        let mut buffer: Vec<u8> = Vec::new();
+        output_file.read_to_end(&mut buffer).await.unwrap();
+        assert_eq!(768, buffer.len());
+        assert_eq!(buffer, data.slice(0, 768));
     }
 }
