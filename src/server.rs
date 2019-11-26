@@ -116,15 +116,15 @@ impl AsyncWrite for FileWriter {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, Error>> {
-        <tokio::fs::File as AsyncWrite>::poll_write(self.0.as_mut(), cx, buf)
+        self.0.as_mut().poll_write(cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        <tokio::fs::File as AsyncWrite>::poll_flush(self.0.as_mut(), cx)
+        self.0.as_mut().poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        <tokio::fs::File as AsyncWrite>::poll_shutdown(self.0.as_mut(), cx)
+        self.0.as_mut().poll_shutdown(cx)
     }
 }
 
