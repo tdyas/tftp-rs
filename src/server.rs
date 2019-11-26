@@ -1084,7 +1084,7 @@ mod tests {
             "basic write",
             vec![
                 Send(mk(WriteRequest {
-                    filename: b"true",
+                    filename: b"random.dat",
                     mode: b"octet",
                     options: empty_options.clone(),
                 })),
@@ -1103,7 +1103,7 @@ mod tests {
         )
         .await;
 
-        let mut output_file = tokio::fs::File::open(write_root.path().join("true"))
+        let mut output_file = tokio::fs::File::open(write_root.path().join("random.dat"))
             .await
             .unwrap();
         let mut buffer: Vec<u8> = Vec::new();
