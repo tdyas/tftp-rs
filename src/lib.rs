@@ -3,6 +3,7 @@ mod config;
 mod conn;
 mod proto;
 mod server;
+mod util;
 
 #[cfg(test)]
 mod testing;

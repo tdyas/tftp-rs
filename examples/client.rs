@@ -4,10 +4,9 @@ use std::env;
 use std::io;
 use std::net::SocketAddr;
 
-use tftp_rs::{tftp_read, tftp_write, TftpConfig};
-
 use tokio::fs::File;
-use tokio::prelude::*;
+
+use tftp_rs::{tftp_read, tftp_write, TftpConfig};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -54,14 +53,14 @@ async fn main() -> io::Result<()> {
         }
         "write" => {
             let mut file = tokio::fs::File::open(&local_filename).await?;
-            let mut file_bytes_vec: Vec<u8> = Vec::new();
-            file.read_to_end(&mut file_bytes_vec).await?;
+            let file_len: usize = file.metadata().await?.len() as usize;
             tftp_write(
                 &address,
                 remote_filename.as_bytes(),
                 b"octet",
                 &config,
-                file_bytes_vec.into(),
+                &mut file,
+                Some(file_len),
             )
             .await?
         }

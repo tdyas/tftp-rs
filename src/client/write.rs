@@ -2,23 +2,26 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
+use tokio::io::AsyncRead;
 use tokio::net::UdpSocket;
 
 use super::util::parse_number;
 use crate::config::TftpConfig;
 use crate::conn::{PacketCheckResult, TftpConnState};
 use crate::proto::{
-    TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, MAX_BLOCK_SIZE,
-    MIN_BLOCK_SIZE,
+    TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, ERR_NOT_DEFINED,
+    MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
 };
+use crate::util::read_full;
 
-pub async fn tftp_write(
+pub async fn tftp_write<R: AsyncRead + Unpin>(
     address: &SocketAddr,
     filename: &[u8],
     mode: &[u8],
     config: &TftpConfig,
-    file_bytes: Bytes,
+    reader: &mut R,
+    size_hint: Option<usize>,
 ) -> io::Result<()> {
     // Bind a random but specific local socket for this request.
     let socket_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
@@ -30,9 +33,11 @@ pub async fn tftp_write(
 
     let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
     let blksize_value = format!("{}", &block_size);
-    let tsize_value = format!("{}", file_bytes.len());
+    let tsize_value_opt = size_hint.map(|s| format!("{}", s));
     if config.enable_tsize_option {
-        options.insert(b"tsize", tsize_value.as_bytes());
+        if let Some(ref tsize_value) = tsize_value_opt {
+            options.insert(b"tsize", tsize_value.as_bytes());
+        }
     }
     if config.enable_blksize_option {
         options.insert(b"blksize", blksize_value.as_bytes());
@@ -93,15 +98,22 @@ pub async fn tftp_write(
 
     let mut current_block_num: u16 = 1;
     let mut current_offset: usize = 0;
+    let mut buffer: Vec<u8> = vec![0; block_size as usize];
 
     loop {
         // Send the next DATA packet.
-        let data_len = (file_bytes.len() - current_offset).min(block_size as usize);
+        let data_len = match read_full(reader, &mut buffer).await {
+            Ok(n) => n,
+            Err(err) => {
+                let _ = conn_state.send_error(ERR_NOT_DEFINED, b"read error").await;
+                return Err(err);
+            }
+        };
         let last_packet = data_len < block_size as usize;
         let bytes_to_send = {
             let packet = TftpPacket::Data {
                 block: current_block_num,
-                data: &file_bytes[current_offset..current_offset + data_len],
+                data: &buffer[0..data_len],
             };
             let mut buffer = BytesMut::with_capacity(packet.encoded_size());
             packet.encode(&mut buffer);
@@ -135,6 +147,7 @@ pub async fn tftp_write(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::io;
 
     use bytes::{BufMut, BytesMut};
 
@@ -165,8 +178,16 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result =
-                        tftp_write(&server_addr, b"xyzzy", b"octet", &config, expected_bytes).await;
+                    let mut cursor = io::Cursor::new(&expected_bytes);
+                    let result = tftp_write(
+                        &server_addr,
+                        b"xyzzy",
+                        b"octet",
+                        &config,
+                        &mut cursor,
+                        Some(expected_bytes.len()),
+                    )
+                    .await;
                     assert!(result.is_ok());
                     Ok(())
                 }
@@ -198,8 +219,16 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result =
-                        tftp_write(&server_addr, b"xyzzy", b"octet", &config, expected_bytes).await;
+                    let mut cursor = io::Cursor::new(&expected_bytes);
+                    let result = tftp_write(
+                        &server_addr,
+                        b"xyzzy",
+                        b"octet",
+                        &config,
+                        &mut cursor,
+                        Some(expected_bytes.len()),
+                    )
+                    .await;
                     assert!(result.is_ok());
                     Ok(())
                 }
@@ -241,8 +270,16 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result =
-                        tftp_write(&server_addr, b"xyzzy", b"octet", &config, expected_bytes).await;
+                    let mut cursor = io::Cursor::new(&expected_bytes);
+                    let result = tftp_write(
+                        &server_addr,
+                        b"xyzzy",
+                        b"octet",
+                        &config,
+                        &mut cursor,
+                        Some(expected_bytes.len()),
+                    )
+                    .await;
                     assert!(result.is_ok());
                     Ok(())
                 }
@@ -282,8 +319,16 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result =
-                        tftp_write(&server_addr, b"xyzzy", b"octet", &config, expected_bytes).await;
+                    let mut cursor = io::Cursor::new(&expected_bytes);
+                    let result = tftp_write(
+                        &server_addr,
+                        b"xyzzy",
+                        b"octet",
+                        &config,
+                        &mut cursor,
+                        Some(expected_bytes.len()),
+                    )
+                    .await;
                     assert!(result.is_ok());
                     Ok(())
                 }
@@ -323,8 +368,16 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result =
-                        tftp_write(&server_addr, b"xyzzy", b"octet", &config, expected_bytes).await;
+                    let mut cursor = io::Cursor::new(&expected_bytes);
+                    let result = tftp_write(
+                        &server_addr,
+                        b"xyzzy",
+                        b"octet",
+                        &config,
+                        &mut cursor,
+                        Some(expected_bytes.len()),
+                    )
+                    .await;
                     assert!(result.is_ok());
                     Ok(())
                 }
