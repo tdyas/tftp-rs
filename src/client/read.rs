@@ -1,24 +1,29 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::UdpSocket;
 
 use super::util::parse_number;
 use crate::config::TftpConfig;
 use crate::conn::{PacketCheckResult, TftpConnState};
 use crate::proto::{
-    TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, MAX_BLOCK_SIZE,
-    MIN_BLOCK_SIZE,
+    TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, ERR_NOT_DEFINED,
+    MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
 };
 
-pub async fn tftp_read(
+pub async fn tftp_read<W: AsyncWrite + Unpin>(
     address: &SocketAddr,
     filename: &[u8],
     mode: &[u8],
     config: &TftpConfig,
-) -> io::Result<Bytes> {
+    writer: &mut W,
+) -> io::Result<()> {
+    let mut writer: Pin<&mut W> = Pin::new(writer);
+
     // Bind a random but specific local socket for this request.
     let socket_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let socket = UdpSocket::bind(&socket_addr).await.unwrap();
@@ -51,7 +56,6 @@ pub async fn tftp_read(
     let mut current_block_num: u16 = 1;
     let mut actual_transfer_size: usize = 0;
     let mut expected_transfer_size: usize = 0;
-    let mut file_bytes = BytesMut::new();
 
     let mut option_err: Option<(u16, &'static [u8])> = None;
 
@@ -72,7 +76,13 @@ pub async fn tftp_read(
                     .await?;
                 return Err(io::Error::from(io::ErrorKind::InvalidInput));
             }
-            file_bytes.extend_from_slice(data);
+            if let Err(err) = writer.write_all(data).await {
+                let _ = conn_state
+                    .send_error(ERR_NOT_DEFINED, b"Write error")
+                    .await?;
+                return Err(err);
+            }
+            actual_transfer_size += data.len();
         }
         TftpPacket::OptionsAck(ref options) => {
             // Reset the block number so that the data receive loop will send the correct acknowledgement.
@@ -141,8 +151,15 @@ pub async fn tftp_read(
                     return Err(io::Error::from(io::ErrorKind::InvalidInput));
                 }
                 current_block_num += 1;
-                file_bytes.extend_from_slice(data);
+
+                if let Err(err) = writer.write_all(data).await {
+                    let _ = conn_state
+                        .send_error(ERR_NOT_DEFINED, b"Write error")
+                        .await?;
+                    return Err(err);
+                }
                 actual_transfer_size += data.len();
+
                 if (data.len() as u16) < block_size {
                     let ack_bytes_to_send = {
                         let packet = TftpPacket::Ack(current_block_num);
@@ -165,7 +182,7 @@ pub async fn tftp_read(
         ));
     }
 
-    Ok(file_bytes.freeze())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -201,7 +218,9 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_read(&server_addr, b"missing", b"octet", &config).await;
+                    let mut bytes: Vec<u8> = Vec::new();
+                    let result =
+                        tftp_read(&server_addr, b"missing", b"octet", &config, &mut bytes).await;
                     let error = result.expect_err("error expected");
                     assert!(error.description().contains("File not found"));
                     Ok(())
@@ -227,8 +246,10 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_read(&server_addr, b"xyzzy", b"octet", &config).await;
-                    let actual_bytes = result.expect("bytes expected");
+                    let mut actual_bytes: Vec<u8> = Vec::new();
+                    tftp_read(&server_addr, b"xyzzy", b"octet", &config, &mut actual_bytes)
+                        .await
+                        .unwrap();
                     assert_eq!(&expected_bytes, &actual_bytes);
                     Ok(())
                 }
@@ -259,8 +280,10 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_read(&server_addr, b"xyzzy", b"octet", &config).await;
-                    let actual_bytes = result.expect("bytes expected");
+                    let mut actual_bytes: Vec<u8> = Vec::new();
+                    tftp_read(&server_addr, b"xyzzy", b"octet", &config, &mut actual_bytes)
+                        .await
+                        .unwrap();
                     assert_eq!(&expected_bytes, &actual_bytes);
                     Ok(())
                 }
@@ -303,8 +326,10 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_read(&server_addr, b"xyzzy", b"octet", &config).await;
-                    let actual_bytes = result.expect("bytes expected");
+                    let mut actual_bytes: Vec<u8> = Vec::new();
+                    tftp_read(&server_addr, b"xyzzy", b"octet", &config, &mut actual_bytes)
+                        .await
+                        .unwrap();
                     assert_eq!(&expected_bytes, &actual_bytes);
                     Ok(())
                 }
@@ -345,8 +370,10 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_read(&server_addr, b"xyzzy", b"octet", &config).await;
-                    let actual_bytes = result.expect("bytes expected");
+                    let mut actual_bytes: Vec<u8> = Vec::new();
+                    tftp_read(&server_addr, b"xyzzy", b"octet", &config, &mut actual_bytes)
+                        .await
+                        .unwrap();
                     assert_eq!(&expected_bytes, &actual_bytes);
                     Ok(())
                 }
@@ -387,8 +414,10 @@ mod tests {
             &config,
             |server_addr, config| {
                 async move {
-                    let result = tftp_read(&server_addr, b"xyzzy", b"octet", &config).await;
-                    let actual_bytes = result.expect("bytes expected");
+                    let mut actual_bytes: Vec<u8> = Vec::new();
+                    tftp_read(&server_addr, b"xyzzy", b"octet", &config, &mut actual_bytes)
+                        .await
+                        .unwrap();
                     assert_eq!(&expected_bytes, &actual_bytes);
                     Ok(())
                 }

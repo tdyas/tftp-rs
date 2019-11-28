@@ -42,10 +42,15 @@ async fn main() -> io::Result<()> {
     let config = TftpConfig::default();
     match command.as_str() {
         "read" => {
-            let file_bytes =
-                tftp_read(&address, remote_filename.as_bytes(), b"octet", &config).await?;
             let mut file = File::create(local_filename.to_owned()).await?;
-            file.write_all(&file_bytes).await?;
+            tftp_read(
+                &address,
+                remote_filename.as_bytes(),
+                b"octet",
+                &config,
+                &mut file,
+            )
+            .await?;
         }
         "write" => {
             let mut file = tokio::fs::File::open(&local_filename).await?;
