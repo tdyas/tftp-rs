@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 
 use bytes::BytesMut;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -22,8 +21,6 @@ pub async fn tftp_read<W: AsyncWrite + Unpin>(
     config: &TftpConfig,
     writer: &mut W,
 ) -> io::Result<()> {
-    let mut writer: Pin<&mut W> = Pin::new(writer);
-
     // Bind a random but specific local socket for this request.
     let socket_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let socket = UdpSocket::bind(&socket_addr).await.unwrap();
