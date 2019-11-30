@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use ascii::AsciiStr;
 use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
-use tokio::timer::Timeout;
+use tokio::time::timeout;
 
 use crate::proto::{TftpPacket, ERR_ILLEGAL_OPERATION};
 use std::ops::Add;
@@ -129,7 +129,7 @@ impl TftpConnState {
                 let recv_fut = self.socket.recv_from(&mut buffer);
                 let now = Instant::now();
                 let timeout_duration = deadline.saturating_duration_since(now);
-                let timeout_fut = Timeout::new(recv_fut, timeout_duration);
+                let timeout_fut = timeout(timeout_duration, recv_fut);
 
                 match timeout_fut.await {
                     Ok(Ok((recv_len, recv_addr))) => {

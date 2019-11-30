@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -7,8 +8,7 @@ use bytes::{Bytes, BytesMut};
 use futures::try_join;
 
 use tokio::net::UdpSocket;
-use tokio::prelude::*;
-use tokio::timer::Timeout;
+use tokio::time::timeout;
 
 use crate::config::TftpConfig;
 use crate::proto::TftpPacket;
@@ -86,7 +86,7 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
             Op::Receive(expected_bytes) => {
                 let mut buffer: Vec<u8> = vec![0; 65535];
                 let recv_fut = context.socket.recv_from(&mut buffer);
-                let timeout_fut = Timeout::new(recv_fut, Duration::new(5, 0));
+                let timeout_fut = timeout(Duration::new(5, 0), recv_fut);
                 match timeout_fut.await {
                     Ok(Ok((len, remote_addr))) => {
                         if context.remote_addr_opt.is_none() {
