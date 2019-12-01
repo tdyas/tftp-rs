@@ -97,7 +97,6 @@ pub async fn tftp_write<R: AsyncRead + Unpin>(
     }
 
     let mut current_block_num: u16 = 1;
-    let mut current_offset: usize = 0;
     let mut buffer: Vec<u8> = vec![0; block_size as usize];
 
     loop {
@@ -134,7 +133,6 @@ pub async fn tftp_write<R: AsyncRead + Unpin>(
             })
             .await?;
 
-        current_offset += data_len;
         current_block_num += 1;
         if last_packet {
             break;
