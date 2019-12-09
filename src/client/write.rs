@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio::io::AsyncRead;
 use tokio::net::UdpSocket;
 
@@ -31,22 +31,28 @@ pub async fn tftp_write<R: AsyncRead + Unpin>(
 
     let mut block_size: u16 = config.max_block_size;
 
-    let mut options: HashMap<&[u8], &[u8]> = HashMap::new();
+    let mut options: HashMap<Bytes, Bytes> = HashMap::new();
     let blksize_value = format!("{}", &block_size);
     let tsize_value_opt = size_hint.map(|s| format!("{}", s));
     if config.enable_tsize_option {
         if let Some(ref tsize_value) = tsize_value_opt {
-            options.insert(b"tsize", tsize_value.as_bytes());
+            options.insert(
+                Bytes::copy_from_slice(b"tsize"),
+                Bytes::copy_from_slice(tsize_value.as_bytes()),
+            );
         }
     }
     if config.enable_blksize_option {
-        options.insert(b"blksize", blksize_value.as_bytes());
+        options.insert(
+            Bytes::copy_from_slice(b"blksize"),
+            Bytes::copy_from_slice(blksize_value.as_bytes()),
+        );
     }
 
     let write_request_bytes = {
         let packet = TftpPacket::WriteRequest {
-            filename: filename,
-            mode: mode,
+            filename: Bytes::copy_from_slice(filename),
+            mode: Bytes::copy_from_slice(mode),
             options: options,
         };
         let mut buffer = BytesMut::with_capacity(packet.encoded_size());
@@ -63,7 +69,7 @@ pub async fn tftp_write<R: AsyncRead + Unpin>(
             _ => PacketCheckResult::Reject,
         })
         .await?;
-    match response.packet() {
+    match response {
         TftpPacket::Ack(block) => {
             block_size = DEFAULT_BLOCK_SIZE;
             if block != 0 {
@@ -97,10 +103,10 @@ pub async fn tftp_write<R: AsyncRead + Unpin>(
     }
 
     let mut current_block_num: u16 = 1;
-    let mut buffer: Vec<u8> = vec![0; block_size as usize];
 
     loop {
         // Send the next DATA packet.
+        let mut buffer: Vec<u8> = vec![0; block_size as usize];
         let data_len = match read_full(reader, &mut buffer).await {
             Ok(n) => n,
             Err(err) => {
@@ -112,7 +118,7 @@ pub async fn tftp_write<R: AsyncRead + Unpin>(
         let bytes_to_send = {
             let packet = TftpPacket::Data {
                 block: current_block_num,
-                data: &buffer[0..data_len],
+                data: Bytes::copy_from_slice(&buffer[0..data_len]),
             };
             let mut buffer = BytesMut::with_capacity(packet.encoded_size());
             packet.encode(&mut buffer);
@@ -147,7 +153,7 @@ mod tests {
     use std::collections::HashMap;
     use std::io;
 
-    use bytes::{BufMut, BytesMut};
+    use bytes::{BufMut, Bytes, BytesMut};
 
     use super::tftp_write;
     use crate::config::TftpConfig;
@@ -192,19 +198,19 @@ mod tests {
             },
             vec![
                 Receive(mk(WriteRequest {
-                    filename: b"xyzzy",
-                    mode: b"octet",
+                    filename: Bytes::from_static(b"xyzzy"),
+                    mode: Bytes::from_static(b"octet"),
                     options: HashMap::new(),
                 })),
                 Send(mk(Ack(0))),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data[0..512],
+                    data: data.slice(0..512),
                 })),
                 Send(mk(Ack(1))),
                 Receive(mk(Data {
                     block: 2,
-                    data: &data[512..768],
+                    data: data.slice(512..768),
                 })),
                 Send(mk(Ack(2))),
             ],
@@ -233,24 +239,24 @@ mod tests {
             },
             vec![
                 Receive(mk(WriteRequest {
-                    filename: b"xyzzy",
-                    mode: b"octet",
+                    filename: Bytes::from_static(b"xyzzy"),
+                    mode: Bytes::from_static(b"octet"),
                     options: HashMap::new(),
                 })),
                 Send(mk(Ack(0))),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data[0..512],
+                    data: data.slice(0..512),
                 })),
                 Send(mk(Ack(1))),
                 Receive(mk(Data {
                     block: 2,
-                    data: &data[512..1024],
+                    data: data.slice(512..1024),
                 })),
                 Send(mk(Ack(2))),
                 Receive(mk(Data {
                     block: 3,
-                    data: &[],
+                    data: Bytes::default(),
                 })),
                 Send(mk(Ack(3))),
             ],
@@ -259,8 +265,11 @@ mod tests {
 
         // read with tsize option
         let expected_bytes = data.slice(0..768);
-        let mut recv_options: HashMap<&[u8], &[u8]> = HashMap::new();
-        recv_options.insert(b"tsize", b"768");
+        let mut recv_options: HashMap<Bytes, Bytes> = HashMap::new();
+        recv_options.insert(
+            Bytes::copy_from_slice(b"tsize"),
+            Bytes::copy_from_slice(b"768"),
+        );
         config.enable_tsize_option = true;
         config.enable_blksize_option = false;
         run_client_test(
@@ -284,19 +293,19 @@ mod tests {
             },
             vec![
                 Receive(mk(WriteRequest {
-                    filename: b"xyzzy",
-                    mode: b"octet",
+                    filename: Bytes::from_static(b"xyzzy"),
+                    mode: Bytes::from_static(b"octet"),
                     options: recv_options.clone(),
                 })),
                 Send(mk(OptionsAck(recv_options))),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data[0..512],
+                    data: data.slice(0..512),
                 })),
                 Send(mk(Ack(1))),
                 Receive(mk(Data {
                     block: 2,
-                    data: &data[512..768],
+                    data: data.slice(512..768),
                 })),
                 Send(mk(Ack(2))),
             ],
@@ -305,10 +314,16 @@ mod tests {
 
         // write with blksize option - non-block-size number of bytes
         let expected_bytes = data.slice(0..1024);
-        let mut send_options: HashMap<&[u8], &[u8]> = HashMap::new();
-        send_options.insert(b"blksize", b"768");
-        let mut recv_options: HashMap<&[u8], &[u8]> = HashMap::new();
-        recv_options.insert(b"blksize", b"768");
+        let mut send_options: HashMap<Bytes, Bytes> = HashMap::new();
+        send_options.insert(
+            Bytes::copy_from_slice(b"blksize"),
+            Bytes::copy_from_slice(b"768"),
+        );
+        let mut recv_options: HashMap<Bytes, Bytes> = HashMap::new();
+        recv_options.insert(
+            Bytes::copy_from_slice(b"blksize"),
+            Bytes::copy_from_slice(b"768"),
+        );
         config.enable_tsize_option = false;
         config.enable_blksize_option = true;
         config.max_block_size = 768;
@@ -333,19 +348,19 @@ mod tests {
             },
             vec![
                 Receive(mk(WriteRequest {
-                    filename: b"xyzzy",
-                    mode: b"octet",
+                    filename: Bytes::from_static(b"xyzzy"),
+                    mode: Bytes::from_static(b"octet"),
                     options: send_options,
                 })),
                 Send(mk(OptionsAck(recv_options))),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data[0..768],
+                    data: data.slice(0..768),
                 })),
                 Send(mk(Ack(1))),
                 Receive(mk(Data {
                     block: 2,
-                    data: &data[768..1024],
+                    data: data.slice(768..1024),
                 })),
                 Send(mk(Ack(2))),
             ],
@@ -354,10 +369,16 @@ mod tests {
 
         // write with blksize option - server modified blksize option
         let expected_bytes = data.slice(0..1024);
-        let mut send_options: HashMap<&[u8], &[u8]> = HashMap::new();
-        send_options.insert(b"blksize", b"768");
-        let mut recv_options: HashMap<&[u8], &[u8]> = HashMap::new();
-        recv_options.insert(b"blksize", b"384");
+        let mut send_options: HashMap<Bytes, Bytes> = HashMap::new();
+        send_options.insert(
+            Bytes::copy_from_slice(b"blksize"),
+            Bytes::copy_from_slice(b"768"),
+        );
+        let mut recv_options: HashMap<Bytes, Bytes> = HashMap::new();
+        recv_options.insert(
+            Bytes::copy_from_slice(b"blksize"),
+            Bytes::copy_from_slice(b"384"),
+        );
         config.enable_tsize_option = false;
         config.enable_blksize_option = true;
         config.max_block_size = 768;
@@ -382,24 +403,24 @@ mod tests {
             },
             vec![
                 Receive(mk(WriteRequest {
-                    filename: b"xyzzy",
-                    mode: b"octet",
+                    filename: Bytes::from_static(b"xyzzy"),
+                    mode: Bytes::from_static(b"octet"),
                     options: send_options,
                 })),
                 Send(mk(OptionsAck(recv_options))),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data[0..384],
+                    data: data.slice(0..384),
                 })),
                 Send(mk(Ack(1))),
                 Receive(mk(Data {
                     block: 2,
-                    data: &data[384..768],
+                    data: data.slice(384..768),
                 })),
                 Send(mk(Ack(2))),
                 Receive(mk(Data {
                     block: 3,
-                    data: &data[768..1024],
+                    data: data.slice(768..1024),
                 })),
                 Send(mk(Ack(3))),
             ],

@@ -1,5 +1,6 @@
 use std::io;
 use std::net::SocketAddr;
+use std::ops::Add;
 use std::time::{Duration, Instant};
 
 use ascii::AsciiStr;
@@ -8,19 +9,6 @@ use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 use crate::proto::{TftpPacket, ERR_ILLEGAL_OPERATION};
-use std::ops::Add;
-
-#[derive(Debug)]
-pub(crate) struct OwnedTftpPacket {
-    pub addr: SocketAddr,
-    pub bytes: Bytes,
-}
-
-impl OwnedTftpPacket {
-    pub fn packet(&self) -> TftpPacket {
-        TftpPacket::from_bytes(&self.bytes).unwrap()
-    }
-}
 
 // Possible return values from check_packet closure supplied to send_receive_next.
 pub(crate) enum PacketCheckResult {
@@ -74,7 +62,7 @@ impl TftpConnState {
         let bytes_to_send = {
             let packet = TftpPacket::Error {
                 code: code,
-                message: message,
+                message: Bytes::from_static(message),
             };
             let mut buffer = BytesMut::with_capacity(packet.encoded_size());
             packet.encode(&mut buffer);
@@ -90,7 +78,7 @@ impl TftpConnState {
         &mut self,
         bytes_to_send: Bytes,
         check_packet: F,
-    ) -> io::Result<OwnedTftpPacket>
+    ) -> io::Result<TftpPacket>
     where
         F: Fn(&TftpPacket) -> PacketCheckResult,
     {
@@ -187,12 +175,7 @@ impl TftpConnState {
                         // If it isn't, then just continue waiting.
                         match check_packet(&recv_packet) {
                             PacketCheckResult::Accept => {
-                                let owned_packet = OwnedTftpPacket {
-                                    addr: recv_addr,
-                                    bytes: recv_bytes,
-                                };
-
-                                return Ok(owned_packet);
+                                return Ok(recv_packet);
                             }
                             PacketCheckResult::Ignore => continue 'receive_loop,
                             PacketCheckResult::Reject => {

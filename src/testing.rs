@@ -92,7 +92,7 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
                         if context.remote_addr_opt.is_none() {
                             context.remote_addr_opt = Some(remote_addr);
                         }
-                        match TftpPacket::from_bytes(&buffer[0..len]) {
+                        match TftpPacket::from_bytes(&Bytes::copy_from_slice(&buffer[0..len])) {
                             Ok(packet) => {
                                 println!("TEST: Received {}", &packet);
                             }

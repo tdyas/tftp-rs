@@ -5,7 +5,7 @@ use std::fmt;
 use std::io::{self, Error, ErrorKind};
 
 use ascii::AsciiStr;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 
 pub const DEFAULT_BLOCK_SIZE: u16 = 512;
 pub const MIN_BLOCK_SIZE: u16 = 4;
@@ -22,32 +22,33 @@ pub const ERR_NO_USER: u16 = 7; // No such user.
 pub const ERR_INVALID_OPTIONS: u16 = 8; // Invalid options
 
 #[derive(Debug)]
-pub enum TftpPacket<'req> {
+pub enum TftpPacket {
     ReadRequest {
-        filename: &'req [u8],
-        mode: &'req [u8],
-        options: HashMap<&'req [u8], &'req [u8]>,
+        filename: Bytes,
+        mode: Bytes,
+        options: HashMap<Bytes, Bytes>,
     },
     WriteRequest {
-        filename: &'req [u8],
-        mode: &'req [u8],
-        options: HashMap<&'req [u8], &'req [u8]>,
+        filename: Bytes,
+        mode: Bytes,
+        options: HashMap<Bytes, Bytes>,
     },
     Data {
         block: u16,
-        data: &'req [u8],
+        data: Bytes,
     },
     Ack(u16),
     Error {
         code: u16,
-        message: &'req [u8],
+        message: Bytes,
     },
-    OptionsAck(HashMap<&'req [u8], &'req [u8]>),
+    OptionsAck(HashMap<Bytes, Bytes>),
 }
 
-impl<'req> TftpPacket<'req> {
-    pub fn from_bytes(bytes: &'req [u8]) -> io::Result<TftpPacket<'req>> {
-        let mut buf = bytes.clone();
+impl<'req> TftpPacket {
+    pub fn from_bytes(bytes: &Bytes) -> io::Result<TftpPacket> {
+        let mut buf = io::Cursor::new(bytes);
+
         if buf.remaining() < 2 {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -58,7 +59,7 @@ impl<'req> TftpPacket<'req> {
         let code = buf.get_u16();
         match code {
             1 | 2 => {
-                let strs = &bytes[2..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
+                let strs = bytes[2..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
                 if strs.len() < 2 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
@@ -66,23 +67,23 @@ impl<'req> TftpPacket<'req> {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
 
-                let mut options: HashMap<&'req [u8], &'req [u8]> = HashMap::new();
+                let mut options: HashMap<Bytes, Bytes> = HashMap::new();
                 let mut i = 2;
                 while i < strs.len() - 1 {
-                    options.insert(strs[i], strs[i + 1]);
+                    options.insert(bytes.slice_ref(strs[i]), bytes.slice_ref(strs[i + 1]));
                     i += 2;
                 }
 
                 if code == 1 {
                     Ok(TftpPacket::ReadRequest {
-                        filename: strs[0],
-                        mode: strs[1],
+                        filename: bytes.slice_ref(strs[0]),
+                        mode: bytes.slice_ref(strs[1]),
                         options: options,
                     })
                 } else {
                     Ok(TftpPacket::WriteRequest {
-                        filename: strs[0],
-                        mode: strs[1],
+                        filename: bytes.slice_ref(strs[0]),
+                        mode: bytes.slice_ref(strs[1]),
                         options: options,
                     })
                 }
@@ -92,7 +93,7 @@ impl<'req> TftpPacket<'req> {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
                 let block = buf.get_u16();
-                let data = &bytes[4..];
+                let data = bytes.slice(4..);
                 Ok(TftpPacket::Data {
                     block: block,
                     data: data,
@@ -109,26 +110,26 @@ impl<'req> TftpPacket<'req> {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
                 let code = buf.get_u16();
-                let strs = &bytes[4..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
+                let strs = bytes[4..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
                 if strs.len() < 1 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
-                let message = strs[0];
+                let message = bytes.slice_ref(strs[0]);
                 Ok(TftpPacket::Error {
                     code: code,
                     message: message,
                 })
             }
             6 => {
-                let strs = &bytes[2..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
+                let strs = bytes[2..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
                 if (strs.len() % 2) == 0 || strs[strs.len() - 1].len() > 0 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
 
-                let mut options: HashMap<&'req [u8], &'req [u8]> = HashMap::new();
+                let mut options: HashMap<Bytes, Bytes> = HashMap::new();
                 let mut i = 0;
                 while i < strs.len() - 1 {
-                    options.insert(strs[i], strs[i + 1]);
+                    options.insert(bytes.slice_ref(strs[i]), bytes.slice_ref(strs[i + 1]));
                     i += 2;
                 }
 
@@ -142,10 +143,10 @@ impl<'req> TftpPacket<'req> {
     }
 
     pub fn encode<B: BufMut>(&self, out: &mut B) {
-        fn encode_options<B: BufMut>(options: &HashMap<&[u8], &[u8]>, out: &mut B) {
+        fn encode_options<B: BufMut, T: AsRef<[u8]>>(options: &HashMap<T, T>, out: &mut B) {
             let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = options
                 .iter()
-                .map(|(k, v)| ((*k).to_vec(), (*v).to_vec()))
+                .map(|(k, v)| ((*k).as_ref().to_vec(), (*v).as_ref().to_vec()))
                 .collect();
             pairs.sort();
             for (key, value) in &pairs {
@@ -156,16 +157,16 @@ impl<'req> TftpPacket<'req> {
             }
         }
 
-        match *self {
+        match &self {
             TftpPacket::ReadRequest {
                 filename,
                 mode,
                 ref options,
             } => {
                 out.put_u16(1);
-                out.put(filename);
+                out.put_slice(filename);
                 out.put_u8(0);
-                out.put(mode);
+                out.put_slice(mode);
                 out.put_u8(0);
                 encode_options(options, out);
             }
@@ -175,33 +176,33 @@ impl<'req> TftpPacket<'req> {
                 ref options,
             } => {
                 out.put_u16(2);
-                out.put(filename);
+                out.put_slice(filename);
                 out.put_u8(0);
-                out.put(mode);
+                out.put_slice(mode);
                 out.put_u8(0);
                 encode_options(options, out);
             }
             TftpPacket::Data { block, data } => {
                 out.put_u16(3);
-                out.put_u16(block);
-                out.put(data);
+                out.put_u16(*block);
+                out.put_slice(data);
             }
             TftpPacket::Ack(block) => {
                 out.put_u16(4);
-                out.put_u16(block);
+                out.put_u16(*block);
             }
             TftpPacket::Error { code, message } => {
                 out.put_u16(5);
-                out.put_u16(code);
-                out.put(message);
+                out.put_u16(*code);
+                out.put_slice(message);
                 out.put_u8(0);
             }
             TftpPacket::OptionsAck(ref options) => {
                 out.put_u16(6);
-                for (&key, &value) in options.iter() {
-                    out.put(key);
+                for (key, value) in options.iter() {
+                    out.put_slice(key.as_ref());
                     out.put_u8(0);
-                    out.put(value);
+                    out.put_slice(value.as_ref());
                     out.put_u8(0);
                 }
             }
@@ -210,16 +211,13 @@ impl<'req> TftpPacket<'req> {
 
     #[allow(dead_code)]
     pub fn encoded_size(&self) -> usize {
-        match *self {
+        match self {
             TftpPacket::ReadRequest {
                 filename,
                 mode,
                 ref options,
             } => {
-                let opts_len: usize = options
-                    .iter()
-                    .map(|(&k, &v)| k.len() + 1 + v.len() + 1)
-                    .sum();
+                let opts_len: usize = options.iter().map(|(k, v)| k.len() + 1 + v.len() + 1).sum();
                 2 + filename.len() + 1 + mode.len() + 1 + opts_len
             }
             TftpPacket::WriteRequest {
@@ -227,10 +225,7 @@ impl<'req> TftpPacket<'req> {
                 mode,
                 ref options,
             } => {
-                let opts_len: usize = options
-                    .iter()
-                    .map(|(&k, &v)| k.len() + 1 + v.len() + 1)
-                    .sum();
+                let opts_len: usize = options.iter().map(|(k, v)| k.len() + 1 + v.len() + 1).sum();
                 2 + filename.len() + 1 + mode.len() + 1 + opts_len
             }
             TftpPacket::Data { data, .. } => 2 + 2 + data.len(),
@@ -239,17 +234,17 @@ impl<'req> TftpPacket<'req> {
             TftpPacket::OptionsAck(ref options) => {
                 2 + options
                     .iter()
-                    .map(|(&k, &v)| k.len() + 1 + v.len() + 1)
+                    .map(|(k, v)| k.len() + 1 + v.len() + 1)
                     .sum::<usize>()
             }
         }
     }
 }
 
-impl<'a> fmt::Display for TftpPacket<'a> {
+impl<'a> fmt::Display for TftpPacket {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self::TftpPacket::*;
-        match *self {
+        match self {
             ReadRequest {
                 ref filename,
                 ref mode,
@@ -259,9 +254,9 @@ impl<'a> fmt::Display for TftpPacket<'a> {
                 let mode = AsciiStr::from_ascii(mode).unwrap();
                 let options_as_str = options
                     .iter()
-                    .map(|(&key, &value)| {
-                        let key = AsciiStr::from_ascii(key).unwrap();
-                        let value = AsciiStr::from_ascii(value).unwrap();
+                    .map(|(key, value)| {
+                        let key = AsciiStr::from_ascii(&key).unwrap();
+                        let value = AsciiStr::from_ascii(&value).unwrap();
                         format!("{}={}", key, value)
                     })
                     .collect::<Vec<_>>()
@@ -281,9 +276,9 @@ impl<'a> fmt::Display for TftpPacket<'a> {
                 let mode = AsciiStr::from_ascii(mode).unwrap();
                 let options_as_str = options
                     .iter()
-                    .map(|(&key, &value)| {
-                        let key = AsciiStr::from_ascii(key).unwrap();
-                        let value = AsciiStr::from_ascii(value).unwrap();
+                    .map(|(key, value)| {
+                        let key = AsciiStr::from_ascii(&key).unwrap();
+                        let value = AsciiStr::from_ascii(&value).unwrap();
                         format!("{}={}", key, value)
                     })
                     .collect::<Vec<_>>()
@@ -303,9 +298,9 @@ impl<'a> fmt::Display for TftpPacket<'a> {
             OptionsAck(ref options) => {
                 let options_as_str = options
                     .iter()
-                    .map(|(&key, &value)| {
-                        let key = AsciiStr::from_ascii(key).unwrap();
-                        let value = AsciiStr::from_ascii(value).unwrap();
+                    .map(|(key, value)| {
+                        let key = AsciiStr::from_ascii(&key).unwrap();
+                        let value = AsciiStr::from_ascii(&value).unwrap();
                         format!("{}={}", key, value)
                     })
                     .collect::<Vec<_>>()
