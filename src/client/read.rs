@@ -198,7 +198,7 @@ mod tests {
         let data = {
             let mut b = BytesMut::with_capacity(2048);
             for v in 0..b.capacity() {
-                b.put((v & 0xFF) as u8);
+                b.put_u8((v & 0xFF) as u8);
             }
             b.freeze()
         };
@@ -237,7 +237,7 @@ mod tests {
         )
         .await;
 
-        let expected_bytes = data.slice(0, 768);
+        let expected_bytes = data.slice(0..768);
         run_client_test(
             "simple read",
             &config,
@@ -271,7 +271,7 @@ mod tests {
         )
         .await;
 
-        let expected_bytes = data.slice(0, 1024);
+        let expected_bytes = data.slice(0..1024);
         run_client_test(
             "read with block-aligned file size",
             &config,
@@ -311,7 +311,7 @@ mod tests {
         .await;
 
         // read with tsize option
-        let expected_bytes = data.slice(0, 768);
+        let expected_bytes = data.slice(0..768);
         let mut send_options: HashMap<&[u8], &[u8]> = HashMap::new();
         send_options.insert(b"tsize", b"0");
         let mut recv_options: HashMap<&[u8], &[u8]> = HashMap::new();
@@ -354,7 +354,7 @@ mod tests {
         .await;
 
         // read with blksize option - non-block-size number of bytes
-        let expected_bytes = data.slice(0, 1024);
+        let expected_bytes = data.slice(0..1024);
         let mut send_options: HashMap<&[u8], &[u8]> = HashMap::new();
         send_options.insert(b"blksize", b"768");
         let mut recv_options: HashMap<&[u8], &[u8]> = HashMap::new();
@@ -398,7 +398,7 @@ mod tests {
         .await;
 
         // read with blksize option - server modified blksize option
-        let expected_bytes = data.slice(0, 1024);
+        let expected_bytes = data.slice(0..1024);
         let mut send_options: HashMap<&[u8], &[u8]> = HashMap::new();
         send_options.insert(b"blksize", b"768");
         let mut recv_options: HashMap<&[u8], &[u8]> = HashMap::new();

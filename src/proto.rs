@@ -5,7 +5,7 @@ use std::fmt;
 use std::io::{self, Error, ErrorKind};
 
 use ascii::AsciiStr;
-use bytes::{BigEndian, Buf, BufMut, IntoBuf};
+use bytes::{Buf, BufMut};
 
 pub const DEFAULT_BLOCK_SIZE: u16 = 512;
 pub const MIN_BLOCK_SIZE: u16 = 4;
@@ -47,7 +47,7 @@ pub enum TftpPacket<'req> {
 
 impl<'req> TftpPacket<'req> {
     pub fn from_bytes(bytes: &'req [u8]) -> io::Result<TftpPacket<'req>> {
-        let mut buf = bytes.into_buf();
+        let mut buf = bytes.clone();
         if buf.remaining() < 2 {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -55,7 +55,7 @@ impl<'req> TftpPacket<'req> {
             ));
         }
 
-        let code = buf.get_u16_be();
+        let code = buf.get_u16();
         match code {
             1 | 2 => {
                 let strs = &bytes[2..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
@@ -91,7 +91,7 @@ impl<'req> TftpPacket<'req> {
                 if buf.remaining() < 2 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
-                let block = buf.get_u16_be();
+                let block = buf.get_u16();
                 let data = &bytes[4..];
                 Ok(TftpPacket::Data {
                     block: block,
@@ -102,13 +102,13 @@ impl<'req> TftpPacket<'req> {
                 if buf.remaining() < 2 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
-                Ok(TftpPacket::Ack(buf.get_u16_be()))
+                Ok(TftpPacket::Ack(buf.get_u16()))
             }
             5 => {
                 if buf.remaining() < 2 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
-                let code = buf.get_u16_be();
+                let code = buf.get_u16();
                 let strs = &bytes[4..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
                 if strs.len() < 1 {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
@@ -148,10 +148,10 @@ impl<'req> TftpPacket<'req> {
                 .map(|(k, v)| ((*k).to_vec(), (*v).to_vec()))
                 .collect();
             pairs.sort();
-            for (key, value) in pairs {
-                out.put(key);
+            for (key, value) in &pairs {
+                out.put_slice(key.as_ref());
                 out.put_u8(0);
-                out.put(value);
+                out.put_slice(value.as_ref());
                 out.put_u8(0);
             }
         }
@@ -162,7 +162,7 @@ impl<'req> TftpPacket<'req> {
                 mode,
                 ref options,
             } => {
-                out.put_u16_be(1);
+                out.put_u16(1);
                 out.put(filename);
                 out.put_u8(0);
                 out.put(mode);
@@ -174,7 +174,7 @@ impl<'req> TftpPacket<'req> {
                 mode,
                 ref options,
             } => {
-                out.put_u16_be(2);
+                out.put_u16(2);
                 out.put(filename);
                 out.put_u8(0);
                 out.put(mode);
@@ -182,22 +182,22 @@ impl<'req> TftpPacket<'req> {
                 encode_options(options, out);
             }
             TftpPacket::Data { block, data } => {
-                out.put_u16_be(3);
-                out.put_u16_be(block);
+                out.put_u16(3);
+                out.put_u16(block);
                 out.put(data);
             }
             TftpPacket::Ack(block) => {
-                out.put_u16_be(4);
-                out.put_u16_be(block);
+                out.put_u16(4);
+                out.put_u16(block);
             }
             TftpPacket::Error { code, message } => {
-                out.put_u16_be(5);
-                out.put_u16_be(code);
+                out.put_u16(5);
+                out.put_u16(code);
                 out.put(message);
                 out.put_u8(0);
             }
             TftpPacket::OptionsAck(ref options) => {
-                out.put_u16_be(6);
+                out.put_u16(6);
                 for (&key, &value) in options.iter() {
                     out.put(key);
                     out.put_u8(0);

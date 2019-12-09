@@ -98,7 +98,7 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
                             }
                             Err(err) => return Err(TestError::new(err.description())),
                         };
-                        let bytes = Bytes::from(&buffer[0..len]);
+                        let bytes = Bytes::copy_from_slice(&buffer[0..len]);
                         if bytes != expected_bytes {
                             return Err(TestError::new("Packets differ"));
                         }

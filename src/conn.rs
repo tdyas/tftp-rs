@@ -158,7 +158,7 @@ impl TftpConnState {
                         }
 
                         // Parse the packet. Ignore malformed packets by just receiving again.
-                        let recv_bytes = Bytes::from(&buffer[0..recv_len]);
+                        let recv_bytes = Bytes::copy_from_slice(&buffer[0..recv_len]);
                         let recv_packet = match TftpPacket::from_bytes(&recv_bytes) {
                             Ok(packet) => {
                                 if self.trace_packets {

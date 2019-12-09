@@ -613,7 +613,7 @@ impl TftpServer {
         let mut buffer: Vec<u8> = vec![0; 65535];
         loop {
             let (packet_length, remote_addr) = self.socket.recv_from(&mut buffer).await?;
-            let packet_bytes = Bytes::from(&buffer[0..packet_length]);
+            let packet_bytes = Bytes::copy_from_slice(&buffer[0..packet_length]);
             let owned_packet = OwnedTftpPacket {
                 addr: remote_addr,
                 bytes: packet_bytes,
@@ -679,7 +679,7 @@ mod tests {
             path: &str,
         ) -> io::Result<(Box<AsyncReadWithSend>, Option<u64>)> {
             let size = path.parse::<u64>().map_err(|_| io::ErrorKind::NotFound)?;
-            let reader = io::Cursor::new(self.data.slice(0, size.try_into().unwrap()));
+            let reader = io::Cursor::new(self.data.slice(0..size.try_into().unwrap()));
             let reader: Box<AsyncReadWithSend> = Box::new(reader);
             Ok((reader, Some(size)))
         }
@@ -695,7 +695,7 @@ mod tests {
     fn make_data_bytes() -> Bytes {
         let mut b = BytesMut::with_capacity(2048);
         for v in 0..b.capacity() {
-            b.put((v & 0xFF) as u8);
+            b.put_u8((v & 0xFF) as u8);
         }
         b.freeze()
     }
@@ -755,12 +755,12 @@ mod tests {
                 })),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data.slice(0, 512),
+                    data: &data.slice(0..512),
                 })),
                 Send(mk(Ack(1))),
                 Receive(mk(Data {
                     block: 2,
-                    data: &data.slice(512, 768),
+                    data: &data.slice(512..768),
                 })),
                 Send(mk(Ack(2))),
             ],
@@ -778,12 +778,12 @@ mod tests {
                 })),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data.slice(0, 512),
+                    data: &data.slice(0..512),
                 })),
                 Send(mk(Ack(1))),
                 Receive(mk(Data {
                     block: 2,
-                    data: &data.slice(512, 1024),
+                    data: &data.slice(512..1024),
                 })),
                 Send(mk(Ack(2))),
                 Receive(mk(Data {
@@ -850,7 +850,7 @@ mod tests {
                 Send(mk(Ack(0))),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data.slice(0, 1024),
+                    data: &data.slice(0..1024),
                 })),
                 Send(mk(Ack(1))),
             ],
@@ -873,12 +873,12 @@ mod tests {
                 Send(mk(Ack(0))),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data.slice(0, 768),
+                    data: &data.slice(0..768),
                 })),
                 Send(mk(Ack(1))),
                 Receive(mk(Data {
                     block: 2,
-                    data: &data.slice(768, 1024),
+                    data: &data.slice(768..1024),
                 })),
                 Send(mk(Ack(2))),
             ],
@@ -902,12 +902,12 @@ mod tests {
                 Send(mk(Ack(0))),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data.slice(0, 512),
+                    data: &data.slice(0..512),
                 })),
                 Send(mk(Ack(1))),
                 Receive(mk(Data {
                     block: 2,
-                    data: &data.slice(512, 768),
+                    data: &data.slice(512..768),
                 })),
                 Send(mk(Ack(2))),
             ],
@@ -1030,12 +1030,12 @@ mod tests {
                 Receive(mk(Ack(0))),
                 Send(mk(Data {
                     block: 1,
-                    data: &data.slice(0, 512),
+                    data: &data.slice(0..512),
                 })),
                 Receive(mk(Ack(1))),
                 Send(mk(Data {
                     block: 2,
-                    data: &data.slice(512, 768),
+                    data: &data.slice(512..768),
                 })),
                 Receive(mk(Ack(2))),
             ],
@@ -1043,7 +1043,7 @@ mod tests {
         .await;
         let result = receiver.recv().await.expect("file was written");
         assert_eq!(result.name, "xyzzy");
-        assert_eq!(result.bytes, data.slice(0, 768).to_vec());
+        assert_eq!(result.bytes, data.slice(0..768).to_vec());
 
         run_test(
             &server_addr,
@@ -1057,12 +1057,12 @@ mod tests {
                 Receive(mk(Ack(0))),
                 Send(mk(Data {
                     block: 1,
-                    data: &data.slice(0, 512),
+                    data: &data.slice(0..512),
                 })),
                 Receive(mk(Ack(1))),
                 Send(mk(Data {
                     block: 2,
-                    data: &data.slice(512, 1024),
+                    data: &data.slice(512..1024),
                 })),
                 Receive(mk(Ack(2))),
                 Send(mk(Data {
@@ -1075,7 +1075,7 @@ mod tests {
         .await;
         let result = receiver.recv().await.expect("file was written");
         assert_eq!(result.name, "xyzzy");
-        assert_eq!(result.bytes, data.slice(0, 1024).to_vec());
+        assert_eq!(result.bytes, data.slice(0..1024).to_vec());
 
         run_test(
             &server_addr,
@@ -1161,12 +1161,12 @@ mod tests {
                 })),
                 Receive(mk(Data {
                     block: 1,
-                    data: &data.slice(0, 512),
+                    data: &data.slice(0..512),
                 })),
                 Send(mk(Ack(1))),
                 Receive(mk(Data {
                     block: 2,
-                    data: &data.slice(512, 768),
+                    data: &data.slice(512..768),
                 })),
                 Send(mk(Ack(2))),
             ],
@@ -1202,12 +1202,12 @@ mod tests {
                 Receive(mk(Ack(0))),
                 Send(mk(Data {
                     block: 1,
-                    data: &data.slice(0, 512),
+                    data: &data.slice(0..512),
                 })),
                 Receive(mk(Ack(1))),
                 Send(mk(Data {
                     block: 2,
-                    data: &data.slice(512, 768),
+                    data: &data.slice(512..768),
                 })),
                 Receive(mk(Ack(2))),
             ],
@@ -1220,7 +1220,7 @@ mod tests {
         let mut buffer: Vec<u8> = Vec::new();
         output_file.read_to_end(&mut buffer).await.unwrap();
         assert_eq!(768, buffer.len());
-        assert_eq!(buffer, data.slice(0, 768));
+        assert_eq!(buffer, data.slice(0..768));
 
         run_test(
             &server_addr,
