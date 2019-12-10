@@ -18,6 +18,7 @@ use crate::proto::{
     TftpPacket, DEFAULT_BLOCK_SIZE, ERR_ACCESS_VIOLATION, ERR_FILE_EXISTS, ERR_FILE_NOT_FOUND,
     ERR_ILLEGAL_OPERATION, ERR_INVALID_OPTIONS, ERR_NOT_DEFINED, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE,
 };
+use crate::util::read_full;
 
 pub struct TftpServer {
     socket: UdpSocket,
@@ -314,21 +315,13 @@ impl TftpServer {
 
         loop {
             // Read in the next block of data.
-            let mut data_len: usize = 0;
-            while data_len < block_size {
-                match reader.read(&mut buffer[data_len..]).await {
-                    Ok(n) => {
-                        data_len += n;
-                        if data_len == block_size || n == 0 {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        let _ = conn_state.send_error(ERR_NOT_DEFINED, b"Read error").await;
-                        return Err(err);
-                    }
+            let data_len = match read_full(&mut reader, &mut buffer).await {
+                Ok(n) => n,
+                Err(err) => {
+                    let _ = conn_state.send_error(ERR_NOT_DEFINED, b"read error").await;
+                    return Err(err);
                 }
-            }
+            };
 
             let data_packet_bytes = {
                 let packet = TftpPacket::Data {
