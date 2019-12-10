@@ -37,14 +37,14 @@ pub async fn tftp_write<R: AsyncRead + Unpin>(
     if config.enable_tsize_option {
         if let Some(ref tsize_value) = tsize_value_opt {
             options.insert(
-                Bytes::copy_from_slice(b"tsize"),
+                Bytes::from_static(b"tsize"),
                 Bytes::copy_from_slice(tsize_value.as_bytes()),
             );
         }
     }
     if config.enable_blksize_option {
         options.insert(
-            Bytes::copy_from_slice(b"blksize"),
+            Bytes::from_static(b"blksize"),
             Bytes::copy_from_slice(blksize_value.as_bytes()),
         );
     }
@@ -266,10 +266,7 @@ mod tests {
         // read with tsize option
         let expected_bytes = data.slice(0..768);
         let mut recv_options: HashMap<Bytes, Bytes> = HashMap::new();
-        recv_options.insert(
-            Bytes::copy_from_slice(b"tsize"),
-            Bytes::copy_from_slice(b"768"),
-        );
+        recv_options.insert(Bytes::from_static(b"tsize"), Bytes::from_static(b"768"));
         config.enable_tsize_option = true;
         config.enable_blksize_option = false;
         run_client_test(
@@ -315,15 +312,9 @@ mod tests {
         // write with blksize option - non-block-size number of bytes
         let expected_bytes = data.slice(0..1024);
         let mut send_options: HashMap<Bytes, Bytes> = HashMap::new();
-        send_options.insert(
-            Bytes::copy_from_slice(b"blksize"),
-            Bytes::copy_from_slice(b"768"),
-        );
+        send_options.insert(Bytes::from_static(b"blksize"), Bytes::from_static(b"768"));
         let mut recv_options: HashMap<Bytes, Bytes> = HashMap::new();
-        recv_options.insert(
-            Bytes::copy_from_slice(b"blksize"),
-            Bytes::copy_from_slice(b"768"),
-        );
+        recv_options.insert(Bytes::from_static(b"blksize"), Bytes::from_static(b"768"));
         config.enable_tsize_option = false;
         config.enable_blksize_option = true;
         config.max_block_size = 768;
@@ -370,15 +361,9 @@ mod tests {
         // write with blksize option - server modified blksize option
         let expected_bytes = data.slice(0..1024);
         let mut send_options: HashMap<Bytes, Bytes> = HashMap::new();
-        send_options.insert(
-            Bytes::copy_from_slice(b"blksize"),
-            Bytes::copy_from_slice(b"768"),
-        );
+        send_options.insert(Bytes::from_static(b"blksize"), Bytes::from_static(b"768"));
         let mut recv_options: HashMap<Bytes, Bytes> = HashMap::new();
-        recv_options.insert(
-            Bytes::copy_from_slice(b"blksize"),
-            Bytes::copy_from_slice(b"384"),
-        );
+        recv_options.insert(Bytes::from_static(b"blksize"), Bytes::from_static(b"384"));
         config.enable_tsize_option = false;
         config.enable_blksize_option = true;
         config.max_block_size = 768;
