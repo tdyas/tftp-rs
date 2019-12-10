@@ -961,21 +961,21 @@ mod tests {
             cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<Result<usize, io::Error>> {
-            Pin::new(self.buffer.as_mut().as_mut().unwrap()).poll_write(cx, buf)
+            Pin::new(self.buffer.as_mut().unwrap()).poll_write(cx, buf)
         }
 
         fn poll_flush(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
         ) -> Poll<Result<(), io::Error>> {
-            AsyncWrite::poll_flush(Pin::new(self.buffer.as_mut().as_mut().unwrap()), cx)
+            AsyncWrite::poll_flush(Pin::new(self.buffer.as_mut().unwrap()), cx)
         }
 
         fn poll_shutdown(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
         ) -> Poll<Result<(), io::Error>> {
-            AsyncWrite::poll_shutdown(Pin::new(self.buffer.as_mut().as_mut().unwrap()), cx)
+            AsyncWrite::poll_shutdown(Pin::new(self.buffer.as_mut().unwrap()), cx)
         }
     }
 
