@@ -6,6 +6,7 @@ use std::io::{self, Error, ErrorKind};
 
 use ascii::AsciiStr;
 use bytes::{Buf, BufMut, Bytes};
+use std::cmp::min;
 
 pub const DEFAULT_BLOCK_SIZE: u16 = 512;
 pub const MIN_BLOCK_SIZE: u16 = 4;
@@ -94,10 +95,7 @@ impl<'req> TftpPacket {
                 }
                 let block = buf.get_u16();
                 let data = bytes.slice(4..);
-                Ok(TftpPacket::Data {
-                    block: block,
-                    data: data,
-                })
+                Ok(TftpPacket::Data { block, data })
             }
             4 => {
                 if buf.remaining() < 2 {
@@ -115,10 +113,7 @@ impl<'req> TftpPacket {
                     return Err(Error::new(ErrorKind::InvalidInput, "Malformed packet"));
                 }
                 let message = bytes.slice_ref(strs[0]);
-                Ok(TftpPacket::Error {
-                    code: code,
-                    message: message,
-                })
+                Ok(TftpPacket::Error { code, message })
             }
             6 => {
                 let strs = bytes[2..].split(|&b| b == 0).collect::<Vec<&[u8]>>();
@@ -209,18 +204,14 @@ impl<'req> TftpPacket {
         }
     }
 
-    #[allow(dead_code)]
     pub fn encoded_size(&self) -> usize {
         match self {
             TftpPacket::ReadRequest {
                 filename,
                 mode,
                 ref options,
-            } => {
-                let opts_len: usize = options.iter().map(|(k, v)| k.len() + 1 + v.len() + 1).sum();
-                2 + filename.len() + 1 + mode.len() + 1 + opts_len
             }
-            TftpPacket::WriteRequest {
+            | TftpPacket::WriteRequest {
                 filename,
                 mode,
                 ref options,
