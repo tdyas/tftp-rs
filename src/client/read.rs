@@ -188,7 +188,6 @@ pub async fn tftp_read<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::error::Error;
 
     use bytes::{BufMut, Bytes, BytesMut};
 
@@ -222,7 +221,7 @@ mod tests {
                     let result =
                         tftp_read(&server_addr, b"missing", b"octet", &config, &mut bytes).await;
                     let error = result.expect_err("error expected");
-                    assert!(error.description().contains("File not found"));
+                    assert!(error.to_string().contains("File not found"));
                     Ok(())
                 }
             },

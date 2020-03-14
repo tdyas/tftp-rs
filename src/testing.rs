@@ -79,7 +79,7 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
                 match result {
                     Ok(_) => {}
                     Err(err) => {
-                        return Err(TestError::new(err.description()));
+                        return Err(TestError::new(&err.to_string()));
                     }
                 }
             }
@@ -96,7 +96,7 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
                             Ok(packet) => {
                                 println!("TEST: Received {}", &packet);
                             }
-                            Err(err) => return Err(TestError::new(err.description())),
+                            Err(err) => return Err(TestError::new(&err.to_string())),
                         };
                         let bytes = Bytes::copy_from_slice(&buffer[0..len]);
                         if bytes != expected_bytes {
@@ -104,7 +104,7 @@ pub async fn test_driver(context: &mut TestContext, steps: Vec<Op>) -> Result<()
                         }
                     }
                     Ok(Err(err)) => {
-                        return Err(TestError::new(err.description()));
+                        return Err(TestError::new(&err.to_string()));
                     }
                     Err(_) => return Err(TestError::new("timed out while waiting for packet")),
                 }
